@@ -5,19 +5,19 @@ def ParseArgs():
 	
 	# Training parameters
 	parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
-	parser.add_argument('--batch', default=2048, type=int, help='batch size (reduced for Colab)')
-	parser.add_argument('--epoch', default=50, type=int, help='number of epochs (reduced for faster testing)')
-	parser.add_argument('--decay', default=0, type=float, help='weight decay rate')
-	parser.add_argument('--tstEpoch', default=5, type=int, help='test every N epochs')
-	parser.add_argument('--tstBat', default=128, type=int, help='test batch size')
+	parser.add_argument('--batch', default=4096, type=int, help='batch size (reduced for Colab)')
+	parser.add_argument('--epoch', default=40, type=int, help='number of epochs (reduced for faster testing)')
+	parser.add_argument('--decay', default=1, type=float, help='weight decay rate')
+	parser.add_argument('--tstEpoch', default=3, type=int, help='test every N epochs')
+	parser.add_argument('--tstBat', default=64, type=int, help='test batch size')
 	
 	# Model architecture parameters
-	parser.add_argument('--latdim', default=64, type=int, help='embedding size')
+	parser.add_argument('--latdim', default=32, type=int, help='embedding size')
 	parser.add_argument('--block_num', default=2, type=int, help='number of TransGNN blocks')
 	parser.add_argument('--gnn_layer', default=2, type=int, help='number of gnn layers (legacy)')
 	parser.add_argument('--num_head', default=4, type=int, help='number of attention heads in transformer')
 	parser.add_argument('--att_head', default=2, type=int, help='number of attention heads (legacy)')
-	parser.add_argument('--dropout', default=0.1, type=float, help='dropout rate for transformer layers')
+	parser.add_argument('--dropout', default=0, type=float, help='dropout rate for transformer layers')
 	
 	# Attention sampling parameters
 	parser.add_argument('--k_samples', default=20, type=int, help='number of attention samples (k)')
