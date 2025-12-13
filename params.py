@@ -1,55 +1,79 @@
 import argparse
 
 def ParseArgs():
-	parser = argparse.ArgumentParser(description='Model Params')
+	parser = argparse.ArgumentParser(description='TransGNN - Official Implementation')
 	
-	# Training parameters
+	# ==================== TRAINING PARAMETERS ====================
 	parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
-	parser.add_argument('--batch', default=4096, type=int, help='batch size (reduced for Colab)')
-	parser.add_argument('--epoch', default=40, type=int, help='number of epochs (reduced for faster testing)')
-	parser.add_argument('--decay', default=1, type=float, help='weight decay rate')
-	parser.add_argument('--tstEpoch', default=3, type=int, help='test every N epochs')
-	parser.add_argument('--tstBat', default=64, type=int, help='test batch size')
+	parser.add_argument('--batch', default=4096, type=int, 
+	                    help='batch size (paper uses 4096)')
+	parser.add_argument('--epoch', default=100, type=int, 
+	                    help='max epochs (paper uses early stopping)')
+	parser.add_argument('--decay', default=1e-4, type=float, help='weight decay')
+	parser.add_argument('--tstEpoch', default=1, type=int, 
+	                    help='test every N epochs')
+	parser.add_argument('--tstBat', default=256, type=int, help='test batch size')
 	
-	# Model architecture parameters
-	parser.add_argument('--latdim', default=32, type=int, help='embedding size')
-	parser.add_argument('--block_num', default=2, type=int, help='number of TransGNN blocks')
-	parser.add_argument('--gnn_layer', default=2, type=int, help='number of gnn layers (legacy)')
-	parser.add_argument('--num_head', default=4, type=int, help='number of attention heads in transformer')
-	parser.add_argument('--att_head', default=2, type=int, help='number of attention heads (legacy)')
-	parser.add_argument('--dropout', default=0, type=float, help='dropout rate for transformer layers')
+	# ==================== MODEL ARCHITECTURE ====================
+	# Section 4.1.4: "We use three Transformer layers with two GNN layers sandwiched between them"
+	# Architecture: Trans -> GNN -> Trans -> GNN -> Trans (3 Trans, 2 GNN)
+	parser.add_argument('--latdim', default=32, type=int, 
+	                    help='embedding dimension - paper uses 32 or 64')
+	parser.add_argument('--trans_layers', default=3, type=int, 
+	                    help='number of Transformer layers (paper: 3)')
+	parser.add_argument('--gnn_layers', default=2, type=int, 
+	                    help='number of GNN layers (paper: 2)')
+	parser.add_argument('--num_head', default=4, type=int, 
+	                    help='number of attention heads in Transformer')
+	parser.add_argument('--dropout', default=0.1, type=float, 
+	                    help='dropout rate')
 	
-	# Attention sampling parameters
-	parser.add_argument('--k_samples', default=20, type=int, help='number of attention samples (k)')
-	parser.add_argument('--alpha', default=0.5, type=float, help='alpha parameter for attention sampling')
+	# ==================== ATTENTION SAMPLING (Section 3.2) ====================
+	parser.add_argument('--k_samples', default=25, type=int, 
+	                    help='number of attention samples (k) - paper uses 20-30')
+	parser.add_argument('--alpha', default=0.5, type=float, 
+	                    help='balance factor for structure-aware similarity (Eq. 2)')
 	
-	# Positional encoding parameters
-	parser.add_argument('--use_spe', default=True, type=bool, help='use shortest path encoding')
-	parser.add_argument('--use_de', default=True, type=bool, help='use degree encoding')
-	parser.add_argument('--use_pre', default=True, type=bool, help='use pagerank encoding')
+	# ==================== POSITIONAL ENCODING (Section 3.3) ====================
+	parser.add_argument('--use_spe', default=True, type=bool, 
+	                    help='use Shortest Path Encoding (SPE)')
+	parser.add_argument('--use_de', default=True, type=bool, 
+	                    help='use Degree Encoding (DE)')
+	parser.add_argument('--use_pre', default=True, type=bool, 
+	                    help='use PageRank Encoding (PRE)')
+	parser.add_argument('--max_spe_distance', default=10, type=int, 
+	                    help='maximum shortest path distance to consider')
 	
-	# Evaluation parameters
-	parser.add_argument('--topk', default=20, type=int, help='K of top K for evaluation')
+	# ==================== SAMPLE UPDATE (Section 3.4.3) ====================
+	parser.add_argument('--update_strategy', default='message_passing', 
+	                    choices=['message_passing', 'random_walk', 'none'],
+	                    help='strategy for updating attention samples')
+	parser.add_argument('--update_frequency', default=1, type=int, 
+	                    help='update samples every N blocks')
+	parser.add_argument('--random_walk_length', default=5, type=int, 
+	                    help='length of random walk for RW update')
 	
-	# Legacy parameters (kept for compatibility)
-	parser.add_argument('--leaky', default=0.5, type=float, help='slope of leaky relu')
-	parser.add_argument('--hyperNum', default=128, type=int, help='number of hyperedges')
-	parser.add_argument('--keepRate', default=0.5, type=float, help='ratio of edges to keep')
-	parser.add_argument('--temp', default=0.2, type=float, help='temperature for contrastive loss')
-	parser.add_argument('--mult', default=1, type=float, help='multiplication factor')
-	parser.add_argument('--edgeSampRate', default=0.1, type=float, help='ratio of sampled edges')
+	# ==================== EVALUATION ====================
+	parser.add_argument('--topk', default=20, type=int, 
+	                    help='K for Recall@K and NDCG@K')
 	
-	# Dataset and paths
+	# ==================== DATASET ====================
 	parser.add_argument('--data', default='yelp', type=str, 
-	                    help='dataset name (yelp/ml10m/tmall/gowalla/amazon-book)')
-	parser.add_argument('--save_path', default='run', type=str,
-	                    help='experiment name for results file')
-	parser.add_argument('--load_model', default=None, type=str,
-	                    help='model name to load (not used in clean version)')
+	                    choices=['yelp', 'gowalla', 'tmall', 'amazon-book', 'ml10m'],
+	                    help='dataset name')
+	parser.add_argument('--save_path', default='exp1', type=str,
+	                    help='experiment identifier')
 	
-	# System parameters
-	parser.add_argument('--gpu', default='0', type=str, help='GPU device ID to use')
-	parser.add_argument('--seed', default=42, type=int, help='random seed for reproducibility')
+	# ==================== SYSTEM ====================
+	parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
+	parser.add_argument('--seed', default=42, type=int, help='random seed')
+	parser.add_argument('--num_workers', default=4, type=int, help='dataloader workers')
+	
+	# ==================== PREPROCESSING ====================
+	parser.add_argument('--precompute_spe', default=True, type=bool,
+	                    help='precompute shortest paths (slow but accurate)')
+	parser.add_argument('--spe_sample_size', default=5000, type=int,
+	                    help='number of nodes to sample for SPE computation')
 	
 	return parser.parse_args()
 

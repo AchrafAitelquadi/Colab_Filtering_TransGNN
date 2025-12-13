@@ -8,6 +8,7 @@ import torch as t
 import torch.utils.data as data
 import torch.utils.data as dataloader
 import networkx as nx
+from collections import defaultdict
 
 class DataHandler:
 	def __init__(self):
@@ -25,8 +26,9 @@ class DataHandler:
 		self.trnfile = predir + 'trnMat.pkl'
 		self.tstfile = predir + 'tstMat.pkl'
 		
-		# Positional encodings will be computed after loading data
+		# Positional encodings
 		self.pos_encodings = None
+		self.shortest_paths_dict = None  # Pour stockage efficace des SPE
 
 	def loadOneFile(self, filename):
 		with open(filename, 'rb') as fs:
@@ -43,46 +45,92 @@ class DataHandler:
 		return mat.dot(dInvSqrtMat).transpose().dot(dInvSqrtMat).tocoo()
 
 	def makeTorchAdj(self, mat):
-		# make ui adj
+		"""Create normalized adjacency matrix for GNN"""
 		a = sp.csr_matrix((args.user, args.user))
 		b = sp.csr_matrix((args.item, args.item))
 		mat = sp.vstack([sp.hstack([a, mat]), sp.hstack([mat.transpose(), b])])
 		mat = (mat != 0) * 1.0
-		# mat = (mat + sp.eye(mat.shape[0])) * 1.0
 		mat = self.normalizeAdj(mat)
 
-		# make cuda tensor - use new API
 		idxs = t.from_numpy(np.vstack([mat.row, mat.col]).astype(np.int64))
 		vals = t.from_numpy(mat.data.astype(np.float32))
 		shape = t.Size(mat.shape)
 		
-		# Use the new API instead of deprecated SparseTensor
 		sparse_tensor = t.sparse_coo_tensor(idxs, vals, shape)
 		return sparse_tensor.cuda() if t.cuda.is_available() else sparse_tensor
 
-	def makeSample(self):
-		user_sample_idx = t.tensor([[args.user + i for i in range(args.item)] * args.user])
-		item_sample_idx = t.tensor([[i for i in range(args.user)] * args.item])
-		return user_sample_idx, item_sample_idx
-
-	def makeMask(self):
-		"""Memory-efficient mask - handled during evaluation"""
-		return None
+	def computeShortestPaths(self, adj_matrix):
+		"""
+		Compute shortest path distances (Section 3.3.1)
+		Uses BFS for efficiency
+		
+		Returns:
+			shortest_paths_dict: dict {source: {target: distance}}
+		"""
+		log('Computing Shortest Path Encoding (SPE)...', level='INFO')
+		
+		# Convert to NetworkX graph
+		G = nx.from_scipy_sparse_array(adj_matrix, create_using=nx.Graph)
+		N = adj_matrix.shape[0]
+		
+		# Sample nodes for SPE computation (for efficiency)
+		if args.precompute_spe and N > args.spe_sample_size:
+			sample_nodes = np.random.choice(N, args.spe_sample_size, replace=False)
+			log(f'Sampling {len(sample_nodes)} nodes for SPE computation', level='INFO')
+		else:
+			sample_nodes = range(N)
+		
+		# Compute shortest paths using BFS
+		shortest_paths_dict = {}
+		
+		for idx, source in enumerate(sample_nodes):
+			if idx % 500 == 0:
+				log(f'SPE Progress: {idx}/{len(sample_nodes)}', 
+				    level='DEBUG', save=False, oneline=True)
+			
+			try:
+				# BFS from source with cutoff
+				lengths = nx.single_source_shortest_path_length(
+					G, source, cutoff=args.max_spe_distance
+				)
+				shortest_paths_dict[source] = lengths
+			except:
+				# Node might be isolated
+				shortest_paths_dict[source] = {source: 0}
+		
+		print()  # New line after progress
+		log(f'SPE computed for {len(shortest_paths_dict)} source nodes', level='SUCCESS')
+		
+		return shortest_paths_dict
 
 	def computePositionalEncodings(self, adj_matrix):
-		"""Fast positional encodings"""
+		"""
+		Compute all positional encodings (Section 3.3)
+		- Shortest Path Encoding (SPE)
+		- Degree Encoding (DE)
+		- PageRank Encoding (PRE)
+		"""
 		log('Computing positional encodings...', level='INFO')
 		
 		N = adj_matrix.shape[0]
 		device = t.device('cuda' if t.cuda.is_available() else 'cpu')
 		
-		# Degree-based encoding
+		# 1. Degree Encoding (Section 3.3.2)
 		degrees = np.array(adj_matrix.sum(axis=1)).flatten()
 		degrees_tensor = t.from_numpy(degrees).float().unsqueeze(1).to(device)
 		
-		# Fast PageRank approximation
-		pagerank_values = degrees / (degrees.sum() + 1e-8)
+		# 2. PageRank Encoding (Section 3.3.3)
+		# Fast approximation: degree-based
+		total_degree = degrees.sum() + 1e-8
+		pagerank_values = degrees / total_degree
 		pagerank_tensor = t.from_numpy(pagerank_values).float().unsqueeze(1).to(device)
+		
+		# 3. Shortest Path Encoding (Section 3.3.1)
+		# Computed separately and stored in dict for efficiency
+		if args.use_spe:
+			self.shortest_paths_dict = self.computeShortestPaths(adj_matrix)
+		
+		log('Positional encodings computed', level='SUCCESS')
 		
 		return {
 			'degrees': degrees_tensor,
@@ -90,43 +138,90 @@ class DataHandler:
 			'adj_matrix': adj_matrix
 		}
 	
-	def computeAttentionSamples(self, embeddings, adj_matrix, k=20, alpha=0.5):
+	def getSPE(self, central_node, sampled_nodes):
 		"""
-		Compute attention samples based on semantic similarity and graph structure
-		Memory-efficient version
+		Get shortest path distances from central_node to sampled_nodes
 		
 		Args:
-			embeddings: node embeddings [N, d]
-			adj_matrix: adjacency matrix (scipy sparse)
-			k: number of samples to keep
-			alpha: balance factor for structure-aware update
-			
+			central_node: int, central node index
+			sampled_nodes: tensor [k], sampled node indices
+		
 		Returns:
-			attention_samples: [N, k] indices of sampled nodes
+			distances: tensor [k+1, 1] (includes distance to self = 0)
 		"""
-		log(f'Computing attention samples with k={k} (memory-efficient mode)...', level='INFO')
+		if not args.use_spe or self.shortest_paths_dict is None:
+			# Fallback: uniform distances
+			k = len(sampled_nodes)
+			distances = t.ones(k + 1, 1) * 2.0
+			distances[0, 0] = 0.0  # Distance to self
+			return distances
+		
+		distances = []
+		
+		# Distance to self
+		distances.append(0.0)
+		
+		# Distances to sampled nodes
+		if central_node in self.shortest_paths_dict:
+			paths = self.shortest_paths_dict[central_node]
+			for sample_node in sampled_nodes:
+				sample_node = sample_node.item() if t.is_tensor(sample_node) else sample_node
+				dist = paths.get(sample_node, args.max_spe_distance)
+				distances.append(float(dist))
+		else:
+			# Central node not in precomputed set, use average distance
+			distances.extend([3.0] * len(sampled_nodes))
+		
+		return t.tensor(distances).unsqueeze(1).float()
+	
+	def computeAttentionSamples(self, embeddings, adj_matrix, k=20, alpha=0.5):
+		"""
+		Compute attention samples (Section 3.2, Equations 1-2) - VERSION OPTIMISÉE
+		"""
+		log(f'Computing attention samples (k={k})...', level='INFO')
 		
 		N = embeddings.shape[0]
 		device = embeddings.device
 		
-		# Method 1: Pure semantic similarity (most memory efficient)
-		# Process in batches to compute similarity
-		batch_size = 4096
+		# ✅ OPTIMISATION : Traiter par plus gros batchs
+		batch_size = 4096  # Au lieu de 2048
 		attention_samples = []
 		
 		num_batches = (N + batch_size - 1) // batch_size
+		
+		# Convert adj to torch sparse
+		adj_indices = t.from_numpy(np.vstack([adj_matrix.row, adj_matrix.col])).long()
+		adj_values = t.from_numpy(adj_matrix.data).float()
+		adj_shape = t.Size(adj_matrix.shape)
+		adj_torch = t.sparse_coo_tensor(adj_indices, adj_values, adj_shape).to(device)
+		
+		# ✅ Pré-calculer A + I une seule fois
+		identity_indices = t.stack([t.arange(N), t.arange(N)]).to(device)
+		identity_values = t.ones(N).to(device)
+		
+		adj_with_self = t.sparse_coo_tensor(
+			t.cat([adj_indices.to(device), identity_indices], dim=1),
+			t.cat([adj_values.to(device), identity_values]),
+			adj_shape
+		).coalesce()
 		
 		for batch_idx in range(num_batches):
 			start_idx = batch_idx * batch_size
 			end_idx = min((batch_idx + 1) * batch_size, N)
 			
-			# Get batch embeddings
 			batch_embeds = embeddings[start_idx:end_idx]
 			
-			# Compute similarity for this batch: S = X_batch @ X^T
-			S_batch = t.mm(batch_embeds, embeddings.t())  # [batch_size, N]
+			# Semantic similarity
+			S_batch = t.mm(batch_embeds, embeddings.t())  # [batch, N]
 			
-			# Sample top-k for this batch based on semantic similarity
+			# Structure-aware update (Equation 2)
+			if alpha > 0:
+				# ✅ Utiliser sparse matmul directement
+				batch_adj_dense = adj_with_self.to_dense()[start_idx:end_idx, :]
+				neighbor_sim = t.mm(batch_adj_dense, S_batch.t()).t()
+				S_batch = S_batch + alpha * neighbor_sim
+			
+			# Sample top-k
 			_, top_k_indices = t.topk(S_batch, k, dim=1)
 			attention_samples.append(top_k_indices.cpu())
 			
@@ -134,13 +229,10 @@ class DataHandler:
 				log(f'Attention sampling: {batch_idx + 1}/{num_batches} batches', 
 					level='DEBUG', save=False, oneline=True)
 		
-		print()  # New line after progress
-		
-		# Concatenate all batches
+		print()
 		attention_samples = t.cat(attention_samples, dim=0).to(device)
 		
-		log(f'Attention samples computed: shape {attention_samples.shape}', level='SUCCESS')
-		
+		log(f'Attention samples computed: {attention_samples.shape}', level='SUCCESS')
 		return attention_samples
 
 	def LoadData(self):
@@ -149,50 +241,42 @@ class DataHandler:
 		tstMat = self.loadOneFile(self.tstfile)
 		args.user, args.item = trnMat.shape
 		
-		log(f'Data: {args.user} users, {args.item} items, {trnMat.nnz} train, {tstMat.nnz} test', level='SUCCESS')
+		log(f'Dataset: {args.data}', level='INFO')
+		log(f'Users: {args.user}, Items: {args.item}', level='INFO')
+		log(f'Train interactions: {trnMat.nnz}, Test: {tstMat.nnz}', level='INFO')
+		log(f'Sparsity: {trnMat.nnz / (args.user * args.item) * 100:.4f}%', level='INFO')
 		
 		# Create adjacency matrix
 		self.torchBiAdj = self.makeTorchAdj(trnMat)
-		self.mask = self.makeMask()
 		
-		# Compute positional encodings
+		# Create full adjacency for positional encodings
 		a = sp.csr_matrix((args.user, args.user))
 		b = sp.csr_matrix((args.item, args.item))
 		full_adj = sp.vstack([sp.hstack([a, trnMat]), sp.hstack([trnMat.transpose(), b])])
 		full_adj = (full_adj != 0) * 1.0
 		
+		# Compute positional encodings
 		self.pos_encodings = self.computePositionalEncodings(full_adj)
 		
 		# Create data loaders
 		trnData = TrnData(trnMat)
-		self.trnLoader = dataloader.DataLoader(trnData, batch_size=args.batch, shuffle=True, num_workers=0)
+		self.trnLoader = dataloader.DataLoader(
+			trnData, 
+			batch_size=args.batch, 
+			shuffle=True, 
+			num_workers=args.num_workers
+		)
 		
 		tstData = TstData(tstMat, trnMat)
-		self.tstLoader = dataloader.DataLoader(tstData, batch_size=args.tstBat, shuffle=False, num_workers=0)
+		self.tstLoader = dataloader.DataLoader(
+			tstData, 
+			batch_size=args.tstBat, 
+			shuffle=False, 
+			num_workers=args.num_workers
+		)
 		
 		log('Data loading complete', level='SUCCESS')
 
-class TrnMaskedData(data.Dataset):
-	def __init__(self, coomat):
-		self.rows = coomat.row
-		self.cols = coomat.col
-		self.dokmat = coomat.todok()
-		self.negs = np.zeros(len(self.rows)).astype(np.int32)
-
-	def negSampling(self):
-		for i in range(len(self.rows)):
-			u = self.rows[i]
-			while True:
-				iNeg = np.random.randint(args.item)
-				if (u, iNeg) not in self.dokmat:
-					break
-			self.negs[i] = iNeg
-
-	def __len__(self):
-		return len(self.rows)
-
-	def __getitem__(self, idx):
-		return self.rows[idx], self.cols[idx], self.negs[idx]
 
 class TrnData(data.Dataset):
 	def __init__(self, coomat):
@@ -215,6 +299,7 @@ class TrnData(data.Dataset):
 
 	def __getitem__(self, idx):
 		return self.rows[idx], self.cols[idx], self.negs[idx]
+
 
 class TstData(data.Dataset):
 	def __init__(self, coomat, trnMat):

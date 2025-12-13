@@ -81,7 +81,9 @@ class ResultsManager:
             'dataset': args.data,
             'model_params': {
                 'latdim': args.latdim,
-                'block_num': args.block_num,
+                'architecture': 'Trans(3) + GNN(2)',
+                'num_transformer_layers': 3,
+                'num_gnn_layers': 2,
                 'num_head': args.num_head,
                 'k_samples': args.k_samples,
                 'dropout': args.dropout,
