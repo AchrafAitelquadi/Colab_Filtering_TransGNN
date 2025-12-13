@@ -2,69 +2,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from params import args
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse.csgraph import shortest_path
-import networkx as nx
 
 
 class PositionalEncoding(nn.Module):
     """
-    Module pour les trois types de positional encoding:
-    1. Shortest Path Hop (SPE)
-    2. Degree-based (DE)
-    3. PageRank-based (PRE)
+    Simplified positional encoding that applies BEFORE TransGNN blocks
+    According to paper Section 3.3 and Equation 6
     """
     def __init__(self, d_model):
         super(PositionalEncoding, self).__init__()
         
-        # MLPs pour chaque type d'encoding
-        self.spe_mlp = nn.Sequential(
-            nn.Linear(1, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, d_model)
-        )
+        # Single MLP for each encoding type (simplified)
+        self.spe_mlp = nn.Linear(1, d_model)
+        self.de_mlp = nn.Linear(1, d_model)
+        self.pre_mlp = nn.Linear(1, d_model)
         
-        self.de_mlp = nn.Sequential(
-            nn.Linear(1, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, d_model)
-        )
-        
-        self.pre_mlp = nn.Sequential(
-            nn.Linear(1, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, d_model)
-        )
-        
-        # MLP de combinaison
-        self.combine_mlp = nn.Sequential(
-            nn.Linear(d_model * 4, d_model * 2),
-            nn.ReLU(),
-            nn.Linear(d_model * 2, d_model)
-        )
+        # Simple combination - element-wise addition instead of concat+MLP
+        # This drastically reduces parameters
     
     def forward(self, x, spe, de, pre):
         """
-        x: raw node features [batch, d_model]
-        spe: shortest path encoding [batch, 1]
-        de: degree encoding [batch, 1]
-        pre: pagerank encoding [batch, 1]
-        """
-        spe_emb = self.spe_mlp(spe)
-        de_emb = self.de_mlp(de)
-        pre_emb = self.pre_mlp(pre)
+        x: raw node features [N, d_model]
+        spe: shortest path encoding [N, 1] 
+        de: degree encoding [N, 1]
+        pre: pagerank encoding [N, 1]
         
-        # Concatenate all encodings
-        combined = torch.cat([x, spe_emb, de_emb, pre_emb], dim=-1)
-        output = self.combine_mlp(combined)
+        Returns: enhanced features [N, d_model]
+        """
+        # Project each encoding to d_model dimension
+        spe_emb = self.spe_mlp(spe)  # [N, d_model]
+        de_emb = self.de_mlp(de)      # [N, d_model]
+        pre_emb = self.pre_mlp(pre)   # [N, d_model]
+        
+        # Combine via addition (much fewer parameters than concat+MLP)
+        # According to paper Equation 6, these are aggregated
+        output = x + spe_emb + de_emb + pre_emb
         
         return output
 
 
 class TransformerLayer(nn.Module):
     """
-    Transformer layer avec multi-head attention sur les samples
+    Transformer layer with multi-head attention on sampled nodes
     """
     def __init__(self, d_model, num_heads=4, dropout=0.1):
         super(TransformerLayer, self).__init__()
@@ -95,7 +74,6 @@ class TransformerLayer(nn.Module):
         attention_samples: [N, k] - indices of sampled nodes for each node
         """
         N = x.shape[0]
-        k = attention_samples.shape[1]
         
         # Prepare queries, keys, values
         queries = x.unsqueeze(1)  # [N, 1, d_model]
@@ -124,7 +102,7 @@ class TransformerLayer(nn.Module):
 
 class GNNLayer(nn.Module):
     """
-    GNN layer - utilise GraphSAGE comme backbone
+    GNN layer - GraphSAGE style message passing
     """
     def __init__(self, d_model):
         super(GNNLayer, self).__init__()
@@ -149,12 +127,17 @@ class GNNLayer(nn.Module):
 
 class TransGNN(nn.Module):
     """
-    Modèle TransGNN complet
+    CORRECTED TransGNN Model
+    
+    Key fixes:
+    1. Positional encoding applied BEFORE TransGNN blocks
+    2. Correct architecture: Trans → GNN → Trans → GNN → Trans
+    3. Simplified positional encoding (fewer parameters)
     """
     def __init__(self):
         super(TransGNN, self).__init__()
         
-        # Embeddings initiaux
+        # Initial embeddings
         self.user_embedding = nn.Parameter(
             nn.init.xavier_uniform_(torch.empty(args.user, args.latdim))
         )
@@ -162,18 +145,19 @@ class TransGNN(nn.Module):
             nn.init.xavier_uniform_(torch.empty(args.item, args.latdim))
         )
         
-        # Positional encoding
+        # Positional encoding (applied ONCE at the beginning)
         self.pos_encoding = PositionalEncoding(args.latdim)
         
-        # TransGNN blocks (alternating Transformer and GNN)
+        # Architecture: 3 Transformer layers, 2 GNN layers
+        # Trans → GNN → Trans → GNN → Trans
         self.transformer_layers = nn.ModuleList([
             TransformerLayer(args.latdim, args.num_head, args.dropout)
-            for _ in range(args.block_num + 1)  # block_num + 1 transformer layers
+            for _ in range(3)  # Fixed: exactly 3 transformer layers
         ])
         
         self.gnn_layers = nn.ModuleList([
             GNNLayer(args.latdim)
-            for _ in range(args.block_num)  # block_num GNN layers
+            for _ in range(2)  # Fixed: exactly 2 GNN layers
         ])
         
         # Attention sampling parameters
@@ -182,66 +166,73 @@ class TransGNN(nn.Module):
     
     def forward(self, adj, attention_samples=None, pos_encodings=None):
         """
-        Forward pass complet
+        CORRECTED Forward pass
         
-        Args:
-            adj: adjacency matrix (sparse tensor)
-            attention_samples: [N, k] pre-computed attention samples
-            pos_encodings: tuple of (degrees, pagerank) tensors
+        Architecture flow:
+        1. Get initial embeddings
+        2. Apply positional encoding ONCE
+        3. Trans → GNN → Trans → GNN → Trans with residual connections
+        4. Aggregate all layer outputs
         """
         device = self.user_embedding.device
         N = args.user + args.item
         
-        # Embeddings initiaux
+        # Step 1: Initial embeddings
         embeds = torch.cat([self.user_embedding, self.item_embedding], dim=0)
-        embeds_list = [embeds]
         
-        # Get positional encodings
+        # Step 2: Apply positional encoding BEFORE TransGNN blocks (CRITICAL FIX)
         if pos_encodings is None:
-            # Create dummy encodings if not provided
             degrees = torch.zeros(N, 1).to(device)
             pagerank = torch.ones(N, 1).to(device) / N
         else:
             degrees, pagerank = pos_encodings
         
-        # If attention samples not provided, use neighbors (simplified)
+        # Shortest path from node to itself is 0
+        self_shortest_path = torch.zeros(N, 1).to(device)
+        
+        # APPLY POSITIONAL ENCODING HERE (not at the end!)
+        embeds = self.pos_encoding(embeds, self_shortest_path, degrees, pagerank)
+        
+        # Store for residual connections and final aggregation
+        embeds_list = [embeds]
+        
+        # Fallback for attention samples
         if attention_samples is None:
-            # Simple fallback: sample random nodes
             attention_samples = torch.randint(0, N, (N, self.k_samples)).to(device)
         
-        # TransGNN blocks: alternating Transformer and GNN
+        # Step 3: TransGNN blocks with correct architecture
+        # Architecture: Trans → GNN → Trans → GNN → Trans
         current_embeds = embeds
         
-        for i in range(args.block_num):
-            # 1. Transformer layer - NO POSITIONAL ENCODING INSIDE LOOP
-            # (Positional encoding is expensive, apply once at the end)
-            current_embeds = self.transformer_layers[i](current_embeds, attention_samples)
-            
-            # 2. GNN layer
-            current_embeds = self.gnn_layers[i](current_embeds, adj)
-            
-            # 3. Residual connection
-            current_embeds = current_embeds + embeds_list[-1]
-            
-            embeds_list.append(current_embeds)
-        
-        # Final transformer layer
-        current_embeds = self.transformer_layers[-1](current_embeds, attention_samples)
-        
-        # Apply positional encoding ONCE at the end (more efficient)
-        self_shortest_path = torch.zeros(N, 1).to(device)
-        current_embeds = self.pos_encoding(
-            current_embeds, 
-            self_shortest_path, 
-            degrees, 
-            pagerank
-        )
-        
+        # First Transformer layer
+        current_embeds = self.transformer_layers[0](current_embeds, attention_samples)
+        current_embeds = current_embeds + embeds_list[-1]  # Residual
         embeds_list.append(current_embeds)
         
-        # Aggregate all layers
+        # First GNN layer
+        current_embeds = self.gnn_layers[0](current_embeds, adj)
+        current_embeds = current_embeds + embeds_list[-1]  # Residual
+        embeds_list.append(current_embeds)
+        
+        # Second Transformer layer
+        current_embeds = self.transformer_layers[1](current_embeds, attention_samples)
+        current_embeds = current_embeds + embeds_list[-1]  # Residual
+        embeds_list.append(current_embeds)
+        
+        # Second GNN layer
+        current_embeds = self.gnn_layers[1](current_embeds, adj)
+        current_embeds = current_embeds + embeds_list[-1]  # Residual
+        embeds_list.append(current_embeds)
+        
+        # Third (final) Transformer layer
+        current_embeds = self.transformer_layers[2](current_embeds, attention_samples)
+        current_embeds = current_embeds + embeds_list[-1]  # Residual
+        embeds_list.append(current_embeds)
+        
+        # Step 4: Aggregate all layers (paper mentions this)
         final_embeds = sum(embeds_list) / len(embeds_list)
         
+        # Split into user and item embeddings
         user_embeds = final_embeds[:args.user]
         item_embeds = final_embeds[args.user:]
         
@@ -249,7 +240,7 @@ class TransGNN(nn.Module):
     
     def bprLoss(self, user_embeds, item_embeds, ancs, poss, negs):
         """
-        BPR Loss pour ranking
+        BPR Loss for ranking
         """
         ancEmbeds = user_embeds[ancs]
         posEmbeds = item_embeds[poss]
@@ -265,14 +256,6 @@ class TransGNN(nn.Module):
     def calcLosses(self, ancs, poss, negs, adj, attention_samples=None, pos_encodings=None):
         """
         Calculate losses
-        
-        Args:
-            ancs: anchor user indices
-            poss: positive item indices
-            negs: negative item indices
-            adj: adjacency matrix
-            attention_samples: pre-computed attention samples
-            pos_encodings: positional encodings
         """
         embeds, user_embeds, item_embeds = self(adj, attention_samples, pos_encodings)
         
@@ -282,13 +265,55 @@ class TransGNN(nn.Module):
     
     def predict(self, adj, attention_samples=None, pos_encodings=None):
         """
-        Prediction pour test
-        
-        Args:
-            adj: adjacency matrix
-            attention_samples: pre-computed attention samples
-            pos_encodings: positional encodings
+        Prediction for test
         """
         with torch.no_grad():
             embeds, user_embeds, item_embeds = self(adj, attention_samples, pos_encodings)
         return user_embeds, item_embeds
+
+
+# Print parameter count for comparison
+if __name__ == '__main__':
+    print("=" * 60)
+    print("TransGNN Model Architecture Summary")
+    print("=" * 60)
+    
+    # Create dummy args
+    class DummyArgs:
+        user = 1000
+        item = 1000
+        latdim = 64
+        num_head = 4
+        dropout = 0.1
+        k_samples = 20
+        alpha = 0.5
+    
+    args = DummyArgs()
+    
+    model = TransGNN()
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print(f"\nTotal parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    
+    print("\nBreakdown by component:")
+    print(f"  User embeddings: {args.user * args.latdim:,}")
+    print(f"  Item embeddings: {args.item * args.latdim:,}")
+    
+    pos_params = sum(p.numel() for p in model.pos_encoding.parameters())
+    print(f"  Positional encoding: {pos_params:,}")
+    
+    trans_params = sum(sum(p.numel() for p in layer.parameters()) 
+                       for layer in model.transformer_layers)
+    print(f"  Transformer layers (3x): {trans_params:,}")
+    
+    gnn_params = sum(sum(p.numel() for p in layer.parameters()) 
+                     for layer in model.gnn_layers)
+    print(f"  GNN layers (2x): {gnn_params:,}")
+    
+    print("\n" + "=" * 60)
+    print("Architecture: Trans → GNN → Trans → GNN → Trans")
+    print("Positional encoding applied BEFORE blocks (not after)")
+    print("=" * 60)
