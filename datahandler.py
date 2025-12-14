@@ -61,79 +61,86 @@ class DataHandler:
 
 	def computeShortestPaths(self, adj_matrix):
 		"""
-		OPTIMIZED: Fast approximate SPE using sparse matrix powers
-		Computing exact shortest paths for all pairs is O(N^3) - too slow!
+		ULTRA-FAST: Approximate SPE using local sampling only
 		
-		Instead: Use sparse matrix multiplication (adjacency powers) for k-hop neighbors
-		This gives us approximate distances in O(k * E) time
+		Instead of computing ALL shortest paths (too slow for large graphs),
+		we use a hybrid approach:
+		1. For each node, sample K neighbors at different hops
+		2. Store only these sampled distances
+		
+		This is O(N × K) instead of O(N²) - much faster!
 		"""
-		log('Computing Shortest Path Encoding (SPE) - FAST VERSION...', level='INFO')
+		log('Computing Shortest Path Encoding (SPE) - ULTRA-FAST VERSION...', level='INFO')
 		
 		N = adj_matrix.shape[0]
-		max_hops = min(args.max_spe_distance, 5)  # Limit to 5 hops for speed
+		K = min(args.k_samples * 3, 100)  # Sample ~3x attention samples
+		max_hops = min(args.max_spe_distance, 4)
 		
-		# Initialize distance matrix (sparse)
-		import scipy.sparse as sp
+		# Convert to CSR for fast row access
+		adj_csr = adj_matrix.tocsr()
 		
-		# Start with adjacency (1-hop connections)
-		A = adj_matrix.copy()
-		A = (A > 0).astype(np.float32)  # Binary
+		# Sample source nodes
+		if N > args.spe_sample_size:
+			sample_sources = np.random.choice(N, args.spe_sample_size, replace=False)
+			log(f'Computing SPE for {len(sample_sources)} sampled source nodes', level='INFO')
+		else:
+			sample_sources = np.arange(N)
 		
-		# Distance dictionary: {source: {target: distance}}
 		shortest_paths_dict = {}
 		
-		# Convert to LIL format for efficient updates
-		dist_matrix = sp.lil_matrix((N, N), dtype=np.int8)
-		dist_matrix.setdiag(0)  # Distance to self = 0
+		# Process in batches for progress tracking
+		batch_size = 500
+		num_batches = (len(sample_sources) + batch_size - 1) // batch_size
 		
-		# Mark 1-hop neighbors
-		dist_matrix[A.nonzero()] = 1
-		
-		# Compute k-hop neighbors iteratively
-		A_power = A.copy()
-		
-		for hop in range(2, max_hops + 1):
-			if hop % 2 == 0:
-				log(f'Computing {hop}-hop distances...', level='DEBUG', save=False, oneline=True)
+		for batch_idx in range(num_batches):
+			start_idx = batch_idx * batch_size
+			end_idx = min(start_idx + batch_size, len(sample_sources))
+			batch_sources = sample_sources[start_idx:end_idx]
 			
-			# A^k gives k-hop reachability
-			A_power = A_power.dot(A)
+			for source in batch_sources:
+				distances = {source: 0}  # Distance to self
+				
+				# BFS with early stopping (only K neighbors per hop)
+				current_level = {source}
+				visited = {source}
+				
+				for hop in range(1, max_hops + 1):
+					next_level = set()
+					
+					# Explore neighbors of current level
+					for node in current_level:
+						neighbors = adj_csr.getrow(node).nonzero()[1]
+						
+						for neighbor in neighbors:
+							if neighbor not in visited:
+								visited.add(neighbor)
+								next_level.add(neighbor)
+								distances[neighbor] = hop
+								
+								# Early stopping: limit neighbors per hop
+								if len(next_level) >= K:
+									break
+						
+						if len(next_level) >= K:
+							break
+					
+					if len(next_level) == 0:
+						break  # No more neighbors to explore
+					
+					current_level = next_level
+				
+				shortest_paths_dict[source] = distances
 			
-			# Find NEW k-hop neighbors (not seen before)
-			new_neighbors = (A_power > 0).multiply(dist_matrix == 0)
-			
-			# Set their distance to k
-			dist_matrix[new_neighbors.nonzero()] = hop
-			
-			# Early stopping if no new neighbors
-			if new_neighbors.nnz == 0:
-				break
+			# Progress
+			if (batch_idx + 1) % 5 == 0 or (batch_idx + 1) == num_batches:
+				log(f'SPE Progress: {batch_idx + 1}/{num_batches} batches', 
+					level='DEBUG', save=False, oneline=True)
 		
 		print()  # New line
 		
-		# Sample nodes to store (for memory efficiency)
-		if N > args.spe_sample_size:
-			sample_nodes = np.random.choice(N, args.spe_sample_size, replace=False)
-			log(f'Storing SPE for {len(sample_nodes)} sampled nodes', level='INFO')
-		else:
-			sample_nodes = range(N)
-		
-		# Convert to dictionary format (only for sampled nodes)
-		dist_matrix = dist_matrix.tocsr()
-		
-		for source in sample_nodes:
-			row = dist_matrix.getrow(source)
-			# Only store non-zero distances (reachable nodes)
-			targets = row.nonzero()[1]
-			distances = row.data
-			
-			shortest_paths_dict[source] = {
-				int(target): int(dist) for target, dist in zip(targets, distances)
-			}
-			shortest_paths_dict[source][source] = 0  # Self-distance
-		
-		log(f'SPE computed for {len(shortest_paths_dict)} nodes in {max_hops} hops', level='SUCCESS')
-		log(f'Average neighbors per node: {sum(len(v) for v in shortest_paths_dict.values()) / len(shortest_paths_dict):.1f}', level='INFO')
+		avg_neighbors = sum(len(v) for v in shortest_paths_dict.values()) / len(shortest_paths_dict)
+		log(f'SPE computed for {len(shortest_paths_dict)} nodes', level='SUCCESS')
+		log(f'Average stored distances per node: {avg_neighbors:.1f}', level='INFO')
 		
 		return shortest_paths_dict
 
