@@ -67,7 +67,7 @@ def ParseArgs():
 	# ==================== SYSTEM ====================
 	parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
 	parser.add_argument('--seed', default=42, type=int, help='random seed')
-	parser.add_argument('--num_workers', default=4, type=int, help='dataloader workers')
+	parser.add_argument('--num_workers', default=2, type=int, help='dataloader workers')
 	
 	# ==================== PREPROCESSING ====================
 	parser.add_argument('--precompute_spe', default=True, type=bool,
