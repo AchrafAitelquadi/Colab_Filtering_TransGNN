@@ -7,8 +7,6 @@ from utils.timeLogger import log
 import torch as t
 import torch.utils.data as data
 import torch.utils.data as dataloader
-import networkx as nx
-from collections import defaultdict
 
 class DataHandler:
 	def __init__(self):
@@ -28,7 +26,7 @@ class DataHandler:
 		
 		# Positional encodings
 		self.pos_encodings = None
-		self.shortest_paths_dict = None  # Pour stockage efficace des SPE
+		self.shortest_paths_dict = None
 
 	def loadOneFile(self, filename):
 		with open(filename, 'rb') as fs:
@@ -61,113 +59,87 @@ class DataHandler:
 
 	def computeShortestPaths(self, adj_matrix):
 		"""
-		ULTRA-FAST: Approximate SPE using local sampling only
-		
-		Instead of computing ALL shortest paths (too slow for large graphs),
-		we use a hybrid approach:
-		1. For each node, sample K neighbors at different hops
-		2. Store only these sampled distances
-		
-		This is O(N × K) instead of O(N²) - much faster!
+		SIMPLIFIED SPE - Much faster, approximate version
 		"""
-		log('Computing Shortest Path Encoding (SPE) - ULTRA-FAST VERSION...', level='INFO')
+		log('Computing Shortest Path Encoding (SPE) - SIMPLIFIED VERSION...', level='INFO')
 		
 		N = adj_matrix.shape[0]
-		K = min(args.k_samples * 3, 100)  # Sample ~3x attention samples
-		max_hops = min(args.max_spe_distance, 4)
 		
-		# Convert to CSR for fast row access
+		# CRITICAL: Reduce sample size drastically for speed
+		sample_size = min(args.spe_sample_size, 1000)  # Max 1000 nodes
+		sample_sources = np.random.choice(N, sample_size, replace=False)
+		
+		log(f'Computing SPE for only {len(sample_sources)} nodes (fast mode)', level='INFO')
+		
+		# Convert to CSR
 		adj_csr = adj_matrix.tocsr()
 		
-		# Sample source nodes
-		if N > args.spe_sample_size:
-			sample_sources = np.random.choice(N, args.spe_sample_size, replace=False)
-			log(f'Computing SPE for {len(sample_sources)} sampled source nodes', level='INFO')
-		else:
-			sample_sources = np.arange(N)
-		
 		shortest_paths_dict = {}
+		max_hops = 3  # Reduced from 4 to 3 for speed
 		
-		# Process in batches for progress tracking
-		batch_size = 500
-		num_batches = (len(sample_sources) + batch_size - 1) // batch_size
-		
-		for batch_idx in range(num_batches):
-			start_idx = batch_idx * batch_size
-			end_idx = min(start_idx + batch_size, len(sample_sources))
-			batch_sources = sample_sources[start_idx:end_idx]
+		for idx, source in enumerate(sample_sources):
+			distances = {source: 0}
 			
-			for source in batch_sources:
-				distances = {source: 0}  # Distance to self
+			# Simple BFS with early stopping
+			current_level = {source}
+			visited = {source}
+			
+			for hop in range(1, max_hops + 1):
+				next_level = set()
 				
-				# BFS with early stopping (only K neighbors per hop)
-				current_level = {source}
-				visited = {source}
+				for node in current_level:
+					neighbors = adj_csr.getrow(node).nonzero()[1]
+					
+					# Limit neighbors explored per node
+					for neighbor in neighbors[:50]:  # Max 50 neighbors
+						if neighbor not in visited:
+							visited.add(neighbor)
+							next_level.add(neighbor)
+							distances[neighbor] = hop
+							
+							if len(next_level) >= 100:  # Early stop
+								break
+					
+					if len(next_level) >= 100:
+						break
 				
-				for hop in range(1, max_hops + 1):
-					next_level = set()
-					
-					# Explore neighbors of current level
-					for node in current_level:
-						neighbors = adj_csr.getrow(node).nonzero()[1]
-						
-						for neighbor in neighbors:
-							if neighbor not in visited:
-								visited.add(neighbor)
-								next_level.add(neighbor)
-								distances[neighbor] = hop
-								
-								# Early stopping: limit neighbors per hop
-								if len(next_level) >= K:
-									break
-						
-						if len(next_level) >= K:
-							break
-					
-					if len(next_level) == 0:
-						break  # No more neighbors to explore
-					
-					current_level = next_level
+				if len(next_level) == 0:
+					break
 				
-				shortest_paths_dict[source] = distances
+				current_level = next_level
+			
+			shortest_paths_dict[source] = distances
 			
 			# Progress
-			if (batch_idx + 1) % 5 == 0 or (batch_idx + 1) == num_batches:
-				log(f'SPE Progress: {batch_idx + 1}/{num_batches} batches', 
+			if (idx + 1) % 100 == 0 or (idx + 1) == len(sample_sources):
+				log(f'SPE Progress: {idx + 1}/{len(sample_sources)}', 
 					level='DEBUG', save=False, oneline=True)
 		
-		print()  # New line
+		print()
 		
-		avg_neighbors = sum(len(v) for v in shortest_paths_dict.values()) / len(shortest_paths_dict)
-		log(f'SPE computed for {len(shortest_paths_dict)} nodes', level='SUCCESS')
-		log(f'Average stored distances per node: {avg_neighbors:.1f}', level='INFO')
+		log(f'SPE computed for {len(shortest_paths_dict)} nodes (fast mode)', level='SUCCESS')
 		
 		return shortest_paths_dict
 
 	def computePositionalEncodings(self, adj_matrix):
 		"""
-		Compute all positional encodings (Section 3.3)
-		- Shortest Path Encoding (SPE)
-		- Degree Encoding (DE)
-		- PageRank Encoding (PRE)
+		Compute positional encodings - OPTIMIZED VERSION
 		"""
 		log('Computing positional encodings...', level='INFO')
 		
 		N = adj_matrix.shape[0]
 		device = t.device('cuda' if t.cuda.is_available() else 'cpu')
 		
-		# 1. Degree Encoding (Section 3.3.2)
+		# 1. Degree Encoding
 		degrees = np.array(adj_matrix.sum(axis=1)).flatten()
 		degrees_tensor = t.from_numpy(degrees).float().unsqueeze(1).to(device)
 		
-		# 2. PageRank Encoding (Section 3.3.3)
-		# Fast approximation: degree-based
+		# 2. PageRank Encoding (simplified)
 		total_degree = degrees.sum() + 1e-8
 		pagerank_values = degrees / total_degree
 		pagerank_tensor = t.from_numpy(pagerank_values).float().unsqueeze(1).to(device)
 		
-		# 3. Shortest Path Encoding (Section 3.3.1)
-		# Computed separately and stored in dict for efficiency
+		# 3. Shortest Path Encoding (simplified and cached)
 		if args.use_spe:
 			self.shortest_paths_dict = self.computeShortestPaths(adj_matrix)
 		
@@ -181,83 +153,72 @@ class DataHandler:
 	
 	def getSPE(self, central_node, sampled_nodes):
 		"""
-		Get shortest path distances from central_node to sampled_nodes
-		
-		Args:
-			central_node: int, central node index
-			sampled_nodes: tensor [k], sampled node indices
-		
-		Returns:
-			distances: tensor [k+1, 1] (includes distance to self = 0)
+		Get shortest path distances - OPTIMIZED with fallback
 		"""
 		if not args.use_spe or self.shortest_paths_dict is None:
-			# Fallback: uniform distances
 			k = len(sampled_nodes)
 			distances = t.ones(k + 1, 1) * 2.0
-			distances[0, 0] = 0.0  # Distance to self
+			distances[0, 0] = 0.0
 			return distances
 		
-		distances = []
+		distances = [0.0]  # Distance to self
 		
-		# Distance to self
-		distances.append(0.0)
-		
-		# Distances to sampled nodes
+		# Fast lookup
 		if central_node in self.shortest_paths_dict:
 			paths = self.shortest_paths_dict[central_node]
 			for sample_node in sampled_nodes:
 				sample_node = sample_node.item() if t.is_tensor(sample_node) else sample_node
-				dist = paths.get(sample_node, args.max_spe_distance)
+				dist = paths.get(sample_node, 3.0)  # Default distance 3
 				distances.append(float(dist))
 		else:
-			# Central node not in precomputed set, use average distance
-			distances.extend([3.0] * len(sampled_nodes))
+			# Fallback
+			distances.extend([2.5] * len(sampled_nodes))
 		
 		return t.tensor(distances).unsqueeze(1).float()
 	
 	def computeAttentionSamples(self, embeddings, adj_matrix, k=20, alpha=0.5):
 		"""
-		Compute attention samples (Section 3.2, Equations 1-2) - VERSION OPTIMISÉE
+		Compute attention samples - HIGHLY OPTIMIZED VERSION
 		"""
 		log(f'Computing attention samples (k={k})...', level='INFO')
 		
 		N = embeddings.shape[0]
 		device = embeddings.device
 		
-		# ✅ OPTIMISATION : Traiter par plus gros batchs
-		batch_size = 4096  # Au lieu de 2048
+		# CRITICAL: Larger batches for better GPU utilization
+		batch_size = 8192  # Increased from 4096
 		attention_samples = []
 		
 		num_batches = (N + batch_size - 1) // batch_size
 		
-		# Convert adj to torch sparse
-		adj_indices = t.from_numpy(np.vstack([adj_matrix.row, adj_matrix.col])).long()
-		adj_values = t.from_numpy(adj_matrix.data).float()
+		# Pre-compute adjacency on GPU
+		adj_indices = t.from_numpy(np.vstack([adj_matrix.row, adj_matrix.col])).long().to(device)
+		adj_values = t.from_numpy(adj_matrix.data).float().to(device)
 		adj_shape = t.Size(adj_matrix.shape)
-		adj_torch = t.sparse_coo_tensor(adj_indices, adj_values, adj_shape).to(device)
+		adj_torch = t.sparse_coo_tensor(adj_indices, adj_values, adj_shape).coalesce()
 		
-		# ✅ Pré-calculer A + I une seule fois
-		identity_indices = t.stack([t.arange(N), t.arange(N)]).to(device)
-		identity_values = t.ones(N).to(device)
+		# Pre-compute identity
+		identity_indices = t.stack([t.arange(N, device=device), t.arange(N, device=device)])
+		identity_values = t.ones(N, device=device)
 		
 		adj_with_self = t.sparse_coo_tensor(
-			t.cat([adj_indices.to(device), identity_indices], dim=1),
-			t.cat([adj_values.to(device), identity_values]),
+			t.cat([adj_indices, identity_indices], dim=1),
+			t.cat([adj_values, identity_values]),
 			adj_shape
 		).coalesce()
 		
+		# Process in large batches
 		for batch_idx in range(num_batches):
 			start_idx = batch_idx * batch_size
 			end_idx = min((batch_idx + 1) * batch_size, N)
 			
 			batch_embeds = embeddings[start_idx:end_idx]
 			
-			# Semantic similarity
-			S_batch = t.mm(batch_embeds, embeddings.t())  # [batch, N]
+			# Semantic similarity (NO mixed precision for sparse ops)
+			S_batch = t.mm(batch_embeds, embeddings.t())
 			
-			# Structure-aware update (Equation 2)
+			# Structure-aware update
 			if alpha > 0:
-				# ✅ Utiliser sparse matmul directement
 				neighbor_sim = t.sparse.mm(adj_with_self, S_batch.t()).t()
 				S_batch = S_batch + alpha * neighbor_sim
 			
@@ -265,8 +226,9 @@ class DataHandler:
 			_, top_k_indices = t.topk(S_batch, k, dim=1)
 			attention_samples.append(top_k_indices.cpu())
 			
-			if (batch_idx + 1) % 5 == 0 or (batch_idx + 1) == num_batches:
-				log(f'Attention sampling: {batch_idx + 1}/{num_batches} batches', 
+			# Progress
+			if (batch_idx + 1) % 2 == 0 or (batch_idx + 1) == num_batches:
+				log(f'Attention sampling: {batch_idx + 1}/{num_batches}', 
 					level='DEBUG', save=False, oneline=True)
 		
 		print()
@@ -304,7 +266,8 @@ class DataHandler:
 			trnData, 
 			batch_size=args.batch, 
 			shuffle=True, 
-			num_workers=args.num_workers
+			num_workers=args.num_workers,
+			pin_memory=True  # OPTIMIZATION: Pin memory for faster GPU transfer
 		)
 		
 		tstData = TstData(tstMat, trnMat)
@@ -312,7 +275,8 @@ class DataHandler:
 			tstData, 
 			batch_size=args.tstBat, 
 			shuffle=False, 
-			num_workers=args.num_workers
+			num_workers=args.num_workers,
+			pin_memory=True
 		)
 		
 		log('Data loading complete', level='SUCCESS')
