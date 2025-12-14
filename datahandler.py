@@ -258,8 +258,7 @@ class DataHandler:
 			# Structure-aware update (Equation 2)
 			if alpha > 0:
 				# ✅ Utiliser sparse matmul directement
-				batch_adj_dense = adj_with_self.to_dense()[start_idx:end_idx, :]
-				neighbor_sim = t.mm(batch_adj_dense, S_batch.t()).t()
+				neighbor_sim = t.sparse.mm(adj_with_self, S_batch.t()).t()
 				S_batch = S_batch + alpha * neighbor_sim
 			
 			# Sample top-k
