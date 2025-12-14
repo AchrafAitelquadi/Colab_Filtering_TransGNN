@@ -3,6 +3,7 @@ from utils.timeLogger import log
 from params import args
 from model import TransGNN
 from datahandler import DataHandler
+from results_manager import ResultsManager
 import numpy as np
 import os
 import random
@@ -24,6 +25,9 @@ def set_seed(seed):
 class Coach:
     def __init__(self, handler):
         self.handler = handler
+        
+        # Initialize ResultsManager
+        self.results_manager = ResultsManager()
         
         log('='*60, level='INFO')
         log('TransGNN - Transformer + GNN for Recommendation', level='SUCCESS')
@@ -48,18 +52,13 @@ class Coach:
         self.best_ndcg = 0
         self.best_epoch = 0
         
-        self.results = {
-            'train_losses': [],
-            'test_recalls': [],
-            'test_ndcgs': [],
-            'epochs': []
-        }
+        self.lr_history = []  # Track learning rate changes
 
     def run(self):
         """Main training loop"""
         self.prepareModel()
         
-        # Initialize attention samples UNE SEULE FOIS
+        # Initialize attention samples ONCE
         log('Initializing attention samples...', level='INFO')
         with t.no_grad():
             init_embeds = t.cat([self.model.user_embedding, self.model.item_embedding], dim=0)
@@ -81,37 +80,53 @@ class Coach:
         log('Starting training...', level='SUCCESS')
         log('='*60, level='INFO')
         
-        start_time = time.time()
+        global_start_time = time.time()
         no_improve_count = 0
         
         for ep in range(args.epoch):
             epoch_start = time.time()
             
+            # Get current learning rate
+            current_lr = self.opt.param_groups[0]['lr']
+            self.lr_history.append(current_lr)
+            
             # Training
             train_loss = self.trainEpoch(ep)
             train_time = time.time() - epoch_start
             
-            self.results['train_losses'].append(train_loss)
+            # Log training results to CSV
+            self.results_manager.log_epoch_results(
+                epoch=ep + 1,
+                phase='Train',
+                results={'Loss': train_loss},
+                lr=current_lr
+            )
             
-            log(f'Epoch [{ep+1:3d}/{args.epoch}] | Train Loss: {train_loss:.4f} | Time: {train_time:.1f}s', 
+            log(f'Epoch [{ep+1:3d}/{args.epoch}] | Loss: {train_loss:.4f} | Time: {train_time:.1f}s | LR: {current_lr:.6f}', 
                 level='INFO')
             
             # Testing
-            if ep % args.tstEpoch == 0:
+            if (ep + 1) % args.tstEpoch == 0 or (ep + 1) == args.epoch:
                 test_start = time.time()
                 recall, ndcg = self.testEpoch()
                 test_time = time.time() - test_start
                 
-                self.results['test_recalls'].append(recall)
-                self.results['test_ndcgs'].append(ndcg)
-                self.results['epochs'].append(ep)
+                # Log test results to CSV
+                self.results_manager.log_epoch_results(
+                    epoch=ep + 1,
+                    phase='Test',
+                    results={'Recall': recall, 'NDCG': ndcg},
+                    lr=current_lr
+                )
                 
                 # Check improvement
+                improved = False
                 if recall > self.best_recall:
                     self.best_recall = recall
                     self.best_ndcg = ndcg
                     self.best_epoch = ep
                     no_improve_count = 0
+                    improved = True
                     
                     log(f'✨ NEW BEST! Recall@{args.topk}: {recall:.4f}, NDCG@{args.topk}: {ndcg:.4f}', 
                         level='SUCCESS')
@@ -120,40 +135,58 @@ class Coach:
                 else:
                     no_improve_count += 1
                 
-                log(f'Epoch [{ep+1:3d}/{args.epoch}] | Test | Recall@{args.topk}: {recall:.4f}, NDCG@{args.topk}: {ndcg:.4f} | Time: {test_time:.1f}s', 
+                # Display test results
+                status_symbol = '✨' if improved else '  '
+                log(f'{status_symbol} Epoch [{ep+1:3d}/{args.epoch}] | TEST | Recall@{args.topk}: {recall:.4f} | NDCG@{args.topk}: {ndcg:.4f} | Time: {test_time:.1f}s', 
+                    level='SUCCESS' if improved else 'INFO')
+                log(f'   Best so far: Recall@{args.topk}: {self.best_recall:.4f}, NDCG@{args.topk}: {self.best_ndcg:.4f} (Epoch {self.best_epoch+1})', 
                     level='INFO')
-                log(f'Best so far: Recall@{args.topk}: {self.best_recall:.4f} (Epoch {self.best_epoch+1})', 
-                    level='DEBUG')
                 
                 # Early stopping
                 if no_improve_count >= 10:
                     log(f'Early stopping: no improvement for {no_improve_count} test epochs', level='WARN')
                     break
             
-            log('-'*60, level='DEBUG')
+            log('-'*60, level='INFO')
         
-        # Final test
-        log('='*60, level='INFO')
-        log('Running final evaluation...', level='INFO')
-        final_recall, final_ndcg = self.testEpoch()
+        # Calculate total training time
+        total_training_time = time.time() - global_start_time
         
-        total_time = time.time() - start_time
-        
+        # Final summary
         log('='*60, level='SUCCESS')
         log('Training Complete!', level='SUCCESS')
         log('='*60, level='SUCCESS')
-        log(f'Total time: {total_time/60:.2f} minutes', level='INFO')
+        log(f'Total training time: {total_training_time/60:.2f} minutes ({total_training_time:.1f}s)', level='INFO')
         log(f'Best Results (Epoch {self.best_epoch+1}):', level='SUCCESS')
         log(f'  - Recall@{args.topk}: {self.best_recall:.4f}', level='SUCCESS')
         log(f'  - NDCG@{args.topk}: {self.best_ndcg:.4f}', level='SUCCESS')
-        log(f'Final Results:', level='INFO')
-        log(f'  - Recall@{args.topk}: {final_recall:.4f}', level='INFO')
-        log(f'  - NDCG@{args.topk}: {final_ndcg:.4f}', level='INFO')
         log('='*60, level='SUCCESS')
         
-        self.saveResults()
+        # Generate all visualizations and reports
+        best_results = {
+            'best_recall': self.best_recall,
+            'best_ndcg': self.best_ndcg,
+            'best_epoch': self.best_epoch + 1
+        }
         
-        return self.results
+        output_files = self.results_manager.finalize(
+            best_results=best_results,
+            training_time=total_training_time
+        )
+        
+        # Plot learning rate schedule
+        if self.lr_history:
+            lr_plot = self.results_manager.plot_learning_rate_schedule(self.lr_history)
+            if lr_plot:
+                log(f'Learning rate schedule saved: {lr_plot}', level='INFO')
+        
+        return {
+            'best_recall': self.best_recall,
+            'best_ndcg': self.best_ndcg,
+            'best_epoch': self.best_epoch,
+            'total_time': total_training_time,
+            'output_files': output_files
+        }
     
     def prepareModel(self):
         """Initialize model and optimizer"""
@@ -183,11 +216,7 @@ class Coach:
         batch_losses = []
         steps = len(self.handler.trnLoader)
         
-        log(f'Starting epoch {epoch_num+1} with {steps} batches...', level='DEBUG')
-        
         for i, (ancs, poss, negs) in enumerate(self.handler.trnLoader):
-            if i == 0:
-                log(f'Processing first batch...', level='DEBUG')
             # Move to device
             if t.cuda.is_available():
                 ancs = ancs.long().cuda()
@@ -203,18 +232,12 @@ class Coach:
             if t.cuda.is_available():
                 adj = adj.cuda()
             
-            if i == 0:
-                log(f'Starting forward pass (this may take a moment for first batch)...', level='DEBUG')
-            
             # Forward pass
             loss = self.model.calcLosses(
                 ancs, poss, negs, adj,
                 attention_samples=self.attention_samples,
                 handler=self.handler
             )
-            
-            if i == 0:
-                log(f'First forward pass completed! Loss: {loss.item():.4f}', level='SUCCESS')
             
             epoch_loss += loss.item()
             batch_losses.append(loss.item())
@@ -224,22 +247,15 @@ class Coach:
             loss.backward()
             self.opt.step()
             
-            # Progress display
-            if (i + 1) % 10 == 0:
-                avg_loss = sum(batch_losses[-10:]) / len(batch_losses[-10:])
+            # Progress display - more concise
+            if (i + 1) % 50 == 0 or (i + 1) == steps:
+                avg_loss = sum(batch_losses[-10:]) / min(10, len(batch_losses[-10:]))
                 progress = (i + 1) / steps * 100
-                print(f'\r  Training Progress: [{i+1}/{steps}] ({progress:.1f}%) | Current Loss: {loss.item():.4f} | Avg Loss (last 10): {avg_loss:.4f}', 
-                      end='', flush=True)
-            elif (i + 1) == steps:
-                print(f'\r  Training Progress: [{i+1}/{steps}] (100.0%) | Final Batch Loss: {loss.item():.4f}', 
+                print(f'\r   Training: [{i+1:4d}/{steps}] ({progress:5.1f}%) | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}', 
                       end='', flush=True)
         
         print()  # New line
         avg_epoch_loss = epoch_loss / steps
-        
-        # Log statistics
-        log(f'  Training Statistics: Avg Loss: {avg_epoch_loss:.4f}, Min Loss: {min(batch_losses):.4f}, Max Loss: {max(batch_losses):.4f}', 
-            level='DEBUG')
         
         return avg_epoch_loss
 
@@ -297,7 +313,7 @@ class Coach:
                     progress = (i + 1) / steps * 100
                     current_avg_recall = epoch_recall / num_users
                     current_avg_ndcg = epoch_ndcg / num_users
-                    print(f'\r  Test Progress: [{i+1}/{steps}] ({progress:.1f}%) | Recall@{args.topk}: {current_avg_recall:.4f} | NDCG@{args.topk}: {current_avg_ndcg:.4f}', 
+                    print(f'\r   Testing: [{i+1:3d}/{steps}] ({progress:5.1f}%) | Recall: {current_avg_recall:.4f} | NDCG: {current_avg_ndcg:.4f}', 
                           end='', flush=True)
         
         print()  # New line
@@ -352,43 +368,6 @@ class Coach:
             'best_ndcg': self.best_ndcg,
             'attention_samples': self.attention_samples,
         }, save_path)
-        
-        log(f'Model checkpoint saved: {save_path}', level='DEBUG')
-    
-    def saveResults(self):
-        """Save training results"""
-        import json
-        
-        os.makedirs('results', exist_ok=True)
-        
-        results_dict = {
-            'dataset': args.data,
-            'config': {
-                'latdim': args.latdim,
-                'num_head': args.num_head,
-                'k_samples': args.k_samples,
-                'dropout': args.dropout,
-                'lr': args.lr,
-                'update_strategy': args.update_strategy,
-            },
-            'best_results': {
-                'epoch': self.best_epoch,
-                'recall': self.best_recall,
-                'ndcg': self.best_ndcg,
-            },
-            'training_history': {
-                'train_losses': self.results['train_losses'],
-                'test_recalls': self.results['test_recalls'],
-                'test_ndcgs': self.results['test_ndcgs'],
-                'test_epochs': self.results['epochs'],
-            }
-        }
-        
-        save_path = f'results/{args.data}_{args.save_path}_results.json'
-        with open(save_path, 'w') as f:
-            json.dump(results_dict, f, indent=2)
-        
-        log(f'Results saved: {save_path}', level='INFO')
 
 
 if __name__ == '__main__':
@@ -417,3 +396,4 @@ if __name__ == '__main__':
     results = coach.run()
     
     log('✅ Experiment complete!', level='SUCCESS')
+    log(f'   Check Results/ folder for detailed outputs', level='INFO')

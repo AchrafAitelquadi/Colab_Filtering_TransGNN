@@ -61,21 +61,21 @@ class DataHandler:
 		"""
 		SIMPLIFIED SPE - Much faster, approximate version
 		"""
-		log('Computing Shortest Path Encoding (SPE) - SIMPLIFIED VERSION...', level='INFO')
+		log('Computing Shortest Path Encoding (SPE)...', level='INFO')
 		
 		N = adj_matrix.shape[0]
 		
-		# CRITICAL: Reduce sample size drastically for speed
-		sample_size = min(args.spe_sample_size, 1000)  # Max 1000 nodes
+		# Reduce sample size drastically for speed
+		sample_size = min(args.spe_sample_size, 1000)
 		sample_sources = np.random.choice(N, sample_size, replace=False)
 		
-		log(f'Computing SPE for only {len(sample_sources)} nodes (fast mode)', level='INFO')
+		log(f'   SPE sample size: {len(sample_sources)} nodes (fast mode)', level='INFO')
 		
 		# Convert to CSR
 		adj_csr = adj_matrix.tocsr()
 		
 		shortest_paths_dict = {}
-		max_hops = 3  # Reduced from 4 to 3 for speed
+		max_hops = 3
 		
 		for idx, source in enumerate(sample_sources):
 			distances = {source: 0}
@@ -90,14 +90,13 @@ class DataHandler:
 				for node in current_level:
 					neighbors = adj_csr.getrow(node).nonzero()[1]
 					
-					# Limit neighbors explored per node
-					for neighbor in neighbors[:50]:  # Max 50 neighbors
+					for neighbor in neighbors[:50]:
 						if neighbor not in visited:
 							visited.add(neighbor)
 							next_level.add(neighbor)
 							distances[neighbor] = hop
 							
-							if len(next_level) >= 100:  # Early stop
+							if len(next_level) >= 100:
 								break
 					
 					if len(next_level) >= 100:
@@ -110,14 +109,14 @@ class DataHandler:
 			
 			shortest_paths_dict[source] = distances
 			
-			# Progress
+			# Progress every 100 nodes
 			if (idx + 1) % 100 == 0 or (idx + 1) == len(sample_sources):
-				log(f'SPE Progress: {idx + 1}/{len(sample_sources)}', 
-					level='DEBUG', save=False, oneline=True)
+				progress = (idx + 1) / len(sample_sources) * 100
+				print(f'\r   SPE Progress: [{idx + 1}/{len(sample_sources)}] ({progress:.1f}%)', 
+					  end='', flush=True)
 		
-		print()
-		
-		log(f'SPE computed for {len(shortest_paths_dict)} nodes (fast mode)', level='SUCCESS')
+		print()  # New line
+		log(f'✓ SPE computed for {len(shortest_paths_dict)} nodes', level='SUCCESS')
 		
 		return shortest_paths_dict
 
@@ -133,17 +132,19 @@ class DataHandler:
 		# 1. Degree Encoding
 		degrees = np.array(adj_matrix.sum(axis=1)).flatten()
 		degrees_tensor = t.from_numpy(degrees).float().unsqueeze(1).to(device)
+		log('   ✓ Degree encoding computed', level='INFO')
 		
 		# 2. PageRank Encoding (simplified)
 		total_degree = degrees.sum() + 1e-8
 		pagerank_values = degrees / total_degree
 		pagerank_tensor = t.from_numpy(pagerank_values).float().unsqueeze(1).to(device)
+		log('   ✓ PageRank encoding computed', level='INFO')
 		
 		# 3. Shortest Path Encoding (simplified and cached)
 		if args.use_spe:
 			self.shortest_paths_dict = self.computeShortestPaths(adj_matrix)
 		
-		log('Positional encodings computed', level='SUCCESS')
+		log('✓ All positional encodings ready', level='SUCCESS')
 		
 		return {
 			'degrees': degrees_tensor,
@@ -168,7 +169,7 @@ class DataHandler:
 			paths = self.shortest_paths_dict[central_node]
 			for sample_node in sampled_nodes:
 				sample_node = sample_node.item() if t.is_tensor(sample_node) else sample_node
-				dist = paths.get(sample_node, 3.0)  # Default distance 3
+				dist = paths.get(sample_node, 3.0)
 				distances.append(float(dist))
 		else:
 			# Fallback
@@ -185,8 +186,7 @@ class DataHandler:
 		N = embeddings.shape[0]
 		device = embeddings.device
 		
-		# CRITICAL: Larger batches for better GPU utilization
-		batch_size = 8192  # Increased from 4096
+		batch_size = 8192
 		attention_samples = []
 		
 		num_batches = (N + batch_size - 1) // batch_size
@@ -214,7 +214,7 @@ class DataHandler:
 			
 			batch_embeds = embeddings[start_idx:end_idx]
 			
-			# Semantic similarity (NO mixed precision for sparse ops)
+			# Semantic similarity
 			S_batch = t.mm(batch_embeds, embeddings.t())
 			
 			# Structure-aware update
@@ -226,15 +226,16 @@ class DataHandler:
 			_, top_k_indices = t.topk(S_batch, k, dim=1)
 			attention_samples.append(top_k_indices.cpu())
 			
-			# Progress
+			# Progress every 2 batches
 			if (batch_idx + 1) % 2 == 0 or (batch_idx + 1) == num_batches:
-				log(f'Attention sampling: {batch_idx + 1}/{num_batches}', 
-					level='DEBUG', save=False, oneline=True)
+				progress = (batch_idx + 1) / num_batches * 100
+				print(f'\r   Sampling: [{batch_idx + 1}/{num_batches}] ({progress:.1f}%)', 
+					  end='', flush=True)
 		
-		print()
+		print()  # New line
 		attention_samples = t.cat(attention_samples, dim=0).to(device)
 		
-		log(f'Attention samples computed: {attention_samples.shape}', level='SUCCESS')
+		log(f'✓ Attention samples: {attention_samples.shape}', level='SUCCESS')
 		return attention_samples
 
 	def LoadData(self):
@@ -244,12 +245,13 @@ class DataHandler:
 		args.user, args.item = trnMat.shape
 		
 		log(f'Dataset: {args.data}', level='INFO')
-		log(f'Users: {args.user}, Items: {args.item}', level='INFO')
-		log(f'Train interactions: {trnMat.nnz}, Test: {tstMat.nnz}', level='INFO')
-		log(f'Sparsity: {trnMat.nnz / (args.user * args.item) * 100:.4f}%', level='INFO')
+		log(f'   Users: {args.user}, Items: {args.item}', level='INFO')
+		log(f'   Train interactions: {trnMat.nnz}, Test: {tstMat.nnz}', level='INFO')
+		log(f'   Sparsity: {trnMat.nnz / (args.user * args.item) * 100:.4f}%', level='INFO')
 		
 		# Create adjacency matrix
 		self.torchBiAdj = self.makeTorchAdj(trnMat)
+		log('✓ Adjacency matrix created', level='SUCCESS')
 		
 		# Create full adjacency for positional encodings
 		a = sp.csr_matrix((args.user, args.user))
@@ -267,7 +269,7 @@ class DataHandler:
 			batch_size=args.batch, 
 			shuffle=True, 
 			num_workers=args.num_workers,
-			pin_memory=True  # OPTIMIZATION: Pin memory for faster GPU transfer
+			pin_memory=True
 		)
 		
 		tstData = TstData(tstMat, trnMat)
@@ -279,7 +281,8 @@ class DataHandler:
 			pin_memory=True
 		)
 		
-		log('Data loading complete', level='SUCCESS')
+		log('✓ Data loading complete', level='SUCCESS')
+		log('='*60, level='INFO')
 
 
 class TrnData(data.Dataset):
