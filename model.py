@@ -445,9 +445,16 @@ class TransGNN(nn.Module):
 		# Construire Shortest Path Encoding [batch, k+1, 1]
 		if args.use_spe and handler.shortest_paths_dict is not None:
 			shortest_paths = torch.zeros(batch_size, k+1, 1, device=device)
-			shortest_paths[:, 0, 0] = 0.0  # Distance à soi-même = 0
-			shortest_paths[:, 1:, 0] = 2.0  # Distance moyenne
+			
+			for idx, central_idx in enumerate(central_indices):
+				# Récupérer les vraies distances depuis handler.getSPE
+				spe_distances = handler.getSPE(
+					central_idx.item(), 
+					attention_samples[idx]
+				)
+				shortest_paths[idx] = spe_distances.to(device)
 		else:
+			# Fallback
 			shortest_paths = torch.ones(batch_size, k+1, 1, device=device) * 2.0
 			shortest_paths[:, 0, 0] = 0.0
 		
