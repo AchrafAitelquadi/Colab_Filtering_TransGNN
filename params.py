@@ -78,6 +78,8 @@ def ParseArgs():
 
 	parser.add_argument('--update_every_block', default=True, type=bool,
                     help='Update attention samples after each Transformer block')
+	parser.add_argument('--disable_pe_during_training', default=True, type=bool,
+                    help='Disable positional encoding during training (faster)')
 	return parser.parse_args()
 
 args = ParseArgs()

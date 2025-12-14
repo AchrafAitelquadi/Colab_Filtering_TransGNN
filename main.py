@@ -183,7 +183,11 @@ class Coach:
         batch_losses = []
         steps = len(self.handler.trnLoader)
         
+        log(f'Starting epoch {epoch_num+1} with {steps} batches...', level='DEBUG')
+        
         for i, (ancs, poss, negs) in enumerate(self.handler.trnLoader):
+            if i == 0:
+                log(f'Processing first batch...', level='DEBUG')
             # Move to device
             if t.cuda.is_available():
                 ancs = ancs.long().cuda()
@@ -199,12 +203,18 @@ class Coach:
             if t.cuda.is_available():
                 adj = adj.cuda()
             
+            if i == 0:
+                log(f'Starting forward pass (this may take a moment for first batch)...', level='DEBUG')
+            
             # Forward pass
             loss = self.model.calcLosses(
                 ancs, poss, negs, adj,
                 attention_samples=self.attention_samples,
                 handler=self.handler
             )
+            
+            if i == 0:
+                log(f'First forward pass completed! Loss: {loss.item():.4f}', level='SUCCESS')
             
             epoch_loss += loss.item()
             batch_losses.append(loss.item())
