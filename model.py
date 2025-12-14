@@ -122,7 +122,7 @@ class TransformerLayer(nn.Module):
 		N = x.shape[0]
 		k = attention_samples.shape[1]
 		
-		# ✅ CORRECTION : Utiliser les embeddings enrichis si disponibles
+		# Utiliser les embeddings enrichis si disponibles
 		if enhanced_embeddings is not None:
 			# Cas 1 : PE appliqué, utiliser les embeddings enrichis
 			queries = enhanced_embeddings['central'].unsqueeze(1)  # [N, 1, d]
@@ -133,7 +133,7 @@ class TransformerLayer(nn.Module):
 			flat_samples = attention_samples.view(-1)
 			sampled_embeds = x[flat_samples].view(N, k, -1)
 		
-		# Multi-head attention (reste identique)
+		# Multi-head attention
 		attn_output, attn_weights = self.multihead_attn(
 			queries,           # Q: [N, 1, d]
 			sampled_embeds,    # K: [N, k, d]
@@ -394,7 +394,7 @@ class TransGNN(nn.Module):
 		# Positional encoding module (Section 3.3)
 		self.pos_encoding = PositionalEncoding(args.latdim)
 		
-		# ✅ ARCHITECTURE FIXE : 3 Transformers + 2 GNNs
+		# ARCHITECTURE FIXE : 3 Transformers + 2 GNNs
 		self.transformer_layers = nn.ModuleList([
 			TransformerLayer(args.latdim, args.num_head, args.dropout)
 			for _ in range(3)  # EXACTEMENT 3
@@ -416,18 +416,6 @@ class TransGNN(nn.Module):
 		
 		Applique PE pour un batch de nœuds centraux ET leurs samples
 		SANS boucle for - tout en opérations GPU vectorisées
-		
-		Args:
-			x: [N, d] - tous les embeddings
-			central_indices: [batch] - indices des nœuds centraux
-			attention_samples: [batch, k] - samples pour ces nœuds
-			handler: DataHandler
-		
-		Returns:
-			enhanced_embeddings: dict {
-				'central': [batch, d],
-				'samples': [batch, k, d]
-			}
 		"""
 		batch_size = len(central_indices)
 		k = attention_samples.shape[1]
@@ -438,79 +426,38 @@ class TransGNN(nn.Module):
 		degrees = handler.pos_encodings['degrees']      # [N, 1]
 		pagerank = handler.pos_encodings['pagerank']    # [N, 1]
 		
-		# ========================================================================
-		# ÉTAPE 1 : Construire node_features [batch, k+1, d]
-		# ========================================================================
-		
-		# Central nodes features [batch, 1, d]
-		central_features = x[central_indices].unsqueeze(1)  # [batch, d] → [batch, 1, d]
-		
-		# Sampled nodes features [batch, k, d]
-		# On flatten, index, puis reshape
+		# Construire node_features [batch, k+1, d]
+		central_features = x[central_indices].unsqueeze(1)  # [batch, 1, d]
 		flat_samples = attention_samples.reshape(-1)  # [batch*k]
 		sampled_features = x[flat_samples].view(batch_size, k, d)  # [batch, k, d]
-		
-		# Concaténer : [batch, k+1, d]
 		node_features = torch.cat([central_features, sampled_features], dim=1)
 		
-		# ========================================================================
-		# ÉTAPE 2 : Construire Degree Encoding [batch, k+1, 1]
-		# ========================================================================
-		
+		# Construire Degree Encoding [batch, k+1, 1]
 		central_degrees = degrees[central_indices].unsqueeze(1)  # [batch, 1, 1]
 		sampled_degrees = degrees[flat_samples].view(batch_size, k, 1)  # [batch, k, 1]
 		degrees_gathered = torch.cat([central_degrees, sampled_degrees], dim=1)
 		
-		# ========================================================================
-		# ÉTAPE 3 : Construire PageRank Encoding [batch, k+1, 1]
-		# ========================================================================
-		
+		# Construire PageRank Encoding [batch, k+1, 1]
 		central_pagerank = pagerank[central_indices].unsqueeze(1)  # [batch, 1, 1]
 		sampled_pagerank = pagerank[flat_samples].view(batch_size, k, 1)  # [batch, k, 1]
 		pageranks_gathered = torch.cat([central_pagerank, sampled_pagerank], dim=1)
 		
-		# ========================================================================
-		# ÉTAPE 4 : Construire Shortest Path Encoding [batch, k+1, 1]
-		# ========================================================================
-		
+		# Construire Shortest Path Encoding [batch, k+1, 1]
 		if args.use_spe and handler.shortest_paths_dict is not None:
-			# Version avec SPE pré-calculé (un peu plus lent mais exact)
 			shortest_paths = torch.zeros(batch_size, k+1, 1, device=device)
-			
-			# Distance à soi-même = 0
-			shortest_paths[:, 0, 0] = 0.0
-			
-			# Pour les samples, on utilise une approximation vectorisée
-			# On peut soit :
-			# A) Utiliser une distance par défaut (RAPIDE)
+			shortest_paths[:, 0, 0] = 0.0  # Distance à soi-même = 0
 			shortest_paths[:, 1:, 0] = 2.0  # Distance moyenne
-			
-			# B) Ou calculer exactement pour quelques nœuds (LENT mais exact)
-			# for idx in range(min(batch_size, 100)):  # Limiter à 100 pour vitesse
-			#     central = central_indices[idx].item()
-			#     if central in handler.shortest_paths_dict:
-			#         paths = handler.shortest_paths_dict[central]
-			#         for j, sample in enumerate(attention_samples[idx]):
-			#             shortest_paths[idx, j+1, 0] = paths.get(sample.item(), 3.0)
 		else:
-			# Approximation rapide : distance uniforme
 			shortest_paths = torch.ones(batch_size, k+1, 1, device=device) * 2.0
-			shortest_paths[:, 0, 0] = 0.0  # Distance à soi = 0
+			shortest_paths[:, 0, 0] = 0.0
 		
-		# ========================================================================
-		# ÉTAPE 5 : Appliquer les MLPs de Positional Encoding
-		# ========================================================================
-		
+		# Appliquer les MLPs de Positional Encoding
 		enhanced = self.pos_encoding(
 			node_features,       # [batch, k+1, d]
 			shortest_paths,      # [batch, k+1, 1]
 			degrees_gathered,    # [batch, k+1, 1]
 			pageranks_gathered   # [batch, k+1, 1]
-		)  # → [batch, k+1, d]
-		
-		# ========================================================================
-		# ÉTAPE 6 : Séparer central et samples
-		# ========================================================================
+		)
 		
 		return {
 			'central': enhanced[:, 0, :],      # [batch, d]
@@ -522,9 +469,6 @@ class TransGNN(nn.Module):
 		Forward pass - ARCHITECTURE EXACTE avec PE corrigé
 		Trans₁ → GNN₁ → Trans₂ → GNN₂ → Trans₃
 		"""
-		import time
-		start_time = time.time()
-		
 		# Initial embeddings
 		embeds = torch.cat([self.user_embedding, self.item_embedding], dim=0)
 		
@@ -537,92 +481,59 @@ class TransGNN(nn.Module):
 		N = current_embeds.shape[0]
 		central_indices = torch.arange(N, device=current_embeds.device)
 		
-		# ========================================================================
 		# BLOCK 1: Transformer₁ avec PE
-		# ========================================================================
-		block_start = time.time()
-		
 		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
 		
-		print(f"\n[DEBUG] PE for Block 1: {time.time() - block_start:.2f}s", flush=True)
-		
-		trans_start = time.time()
 		current_embeds = self.transformer_layers[0](
 			current_embeds, 
 			current_samples,
 			enhanced_embeddings=enhanced_embs
 		)
-		print(f"[DEBUG] Transformer 1: {time.time() - trans_start:.2f}s", flush=True)
-		
 		embeds_list.append(current_embeds)
 		
 		# Update samples (optionnel selon args)
 		if args.update_every_block and args.update_strategy != 'none':
-			update_start = time.time()
 			current_samples = self.sample_updater(
 				current_embeds, adj, current_samples, strategy=args.update_strategy
 			)
-			print(f"[DEBUG] Sample update 1: {time.time() - update_start:.2f}s", flush=True)
 		
-		# ========================================================================
 		# BLOCK 2: GNN₁
-		# ========================================================================
-		gnn_start = time.time()
 		current_embeds = self.gnn_layers[0](current_embeds, adj)
-		print(f"[DEBUG] GNN 1: {time.time() - gnn_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
-		# ========================================================================
 		# BLOCK 3: Transformer₂ avec PE
-		# ========================================================================
-		block_start = time.time()
 		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
-		print(f"[DEBUG] PE for Block 2: {time.time() - block_start:.2f}s", flush=True)
 		
-		trans_start = time.time()
 		current_embeds = self.transformer_layers[1](
 			current_embeds, 
 			current_samples,
 			enhanced_embeddings=enhanced_embs
 		)
-		print(f"[DEBUG] Transformer 2: {time.time() - trans_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
 		if args.update_every_block and args.update_strategy != 'none':
-			update_start = time.time()
 			current_samples = self.sample_updater(
 				current_embeds, adj, current_samples, strategy=args.update_strategy
 			)
-			print(f"[DEBUG] Sample update 2: {time.time() - update_start:.2f}s", flush=True)
 		
-		# ========================================================================
 		# BLOCK 4: GNN₂
-		# ========================================================================
-		gnn_start = time.time()
 		current_embeds = self.gnn_layers[1](current_embeds, adj)
-		print(f"[DEBUG] GNN 2: {time.time() - gnn_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
-		# ========================================================================
 		# BLOCK 5: Transformer₃ (final) avec PE
-		# ========================================================================
-		block_start = time.time()
 		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
-		print(f"[DEBUG] PE for Block 3: {time.time() - block_start:.2f}s", flush=True)
 		
-		trans_start = time.time()
 		current_embeds = self.transformer_layers[2](
 			current_embeds, 
 			current_samples,
 			enhanced_embeddings=enhanced_embs
 		)
-		print(f"[DEBUG] Transformer 3: {time.time() - trans_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
 		# Aggregate all layers
@@ -631,8 +542,6 @@ class TransGNN(nn.Module):
 		# Split user/item
 		user_embeds = final_embeds[:args.user]
 		item_embeds = final_embeds[args.user:]
-		
-		print(f"[DEBUG] Total forward time: {time.time() - start_time:.2f}s\n", flush=True)
 		
 		return final_embeds, user_embeds, item_embeds
 

@@ -7,7 +7,7 @@ def ParseArgs():
 	parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
 	parser.add_argument('--batch', default=4096, type=int, 
 	                    help='batch size (paper uses 4096)')
-	parser.add_argument('--epoch', default=50, type=int, 
+	parser.add_argument('--epoch', default=40, type=int, 
 	                    help='max epochs (paper uses early stopping)')
 	parser.add_argument('--decay', default=0, type=float, help='weight decay')
 	parser.add_argument('--tstEpoch', default=3, type=int, 
