@@ -61,45 +61,79 @@ class DataHandler:
 
 	def computeShortestPaths(self, adj_matrix):
 		"""
-		Compute shortest path distances (Section 3.3.1)
-		Uses BFS for efficiency
+		OPTIMIZED: Fast approximate SPE using sparse matrix powers
+		Computing exact shortest paths for all pairs is O(N^3) - too slow!
 		
-		Returns:
-			shortest_paths_dict: dict {source: {target: distance}}
+		Instead: Use sparse matrix multiplication (adjacency powers) for k-hop neighbors
+		This gives us approximate distances in O(k * E) time
 		"""
-		log('Computing Shortest Path Encoding (SPE)...', level='INFO')
+		log('Computing Shortest Path Encoding (SPE) - FAST VERSION...', level='INFO')
 		
-		# Convert to NetworkX graph
-		G = nx.from_scipy_sparse_array(adj_matrix, create_using=nx.Graph)
 		N = adj_matrix.shape[0]
+		max_hops = min(args.max_spe_distance, 5)  # Limit to 5 hops for speed
 		
-		# Sample nodes for SPE computation (for efficiency)
-		if args.precompute_spe and N > args.spe_sample_size:
+		# Initialize distance matrix (sparse)
+		import scipy.sparse as sp
+		
+		# Start with adjacency (1-hop connections)
+		A = adj_matrix.copy()
+		A = (A > 0).astype(np.float32)  # Binary
+		
+		# Distance dictionary: {source: {target: distance}}
+		shortest_paths_dict = {}
+		
+		# Convert to LIL format for efficient updates
+		dist_matrix = sp.lil_matrix((N, N), dtype=np.int8)
+		dist_matrix.setdiag(0)  # Distance to self = 0
+		
+		# Mark 1-hop neighbors
+		dist_matrix[A.nonzero()] = 1
+		
+		# Compute k-hop neighbors iteratively
+		A_power = A.copy()
+		
+		for hop in range(2, max_hops + 1):
+			if hop % 2 == 0:
+				log(f'Computing {hop}-hop distances...', level='DEBUG', save=False, oneline=True)
+			
+			# A^k gives k-hop reachability
+			A_power = A_power.dot(A)
+			
+			# Find NEW k-hop neighbors (not seen before)
+			new_neighbors = (A_power > 0).multiply(dist_matrix == 0)
+			
+			# Set their distance to k
+			dist_matrix[new_neighbors.nonzero()] = hop
+			
+			# Early stopping if no new neighbors
+			if new_neighbors.nnz == 0:
+				break
+		
+		print()  # New line
+		
+		# Sample nodes to store (for memory efficiency)
+		if N > args.spe_sample_size:
 			sample_nodes = np.random.choice(N, args.spe_sample_size, replace=False)
-			log(f'Sampling {len(sample_nodes)} nodes for SPE computation', level='INFO')
+			log(f'Storing SPE for {len(sample_nodes)} sampled nodes', level='INFO')
 		else:
 			sample_nodes = range(N)
 		
-		# Compute shortest paths using BFS
-		shortest_paths_dict = {}
+		# Convert to dictionary format (only for sampled nodes)
+		dist_matrix = dist_matrix.tocsr()
 		
-		for idx, source in enumerate(sample_nodes):
-			if idx % 500 == 0:
-				log(f'SPE Progress: {idx}/{len(sample_nodes)}', 
-				    level='DEBUG', save=False, oneline=True)
+		for source in sample_nodes:
+			row = dist_matrix.getrow(source)
+			# Only store non-zero distances (reachable nodes)
+			targets = row.nonzero()[1]
+			distances = row.data
 			
-			try:
-				# BFS from source with cutoff
-				lengths = nx.single_source_shortest_path_length(
-					G, source, cutoff=args.max_spe_distance
-				)
-				shortest_paths_dict[source] = lengths
-			except:
-				# Node might be isolated
-				shortest_paths_dict[source] = {source: 0}
+			shortest_paths_dict[source] = {
+				int(target): int(dist) for target, dist in zip(targets, distances)
+			}
+			shortest_paths_dict[source][source] = 0  # Self-distance
 		
-		print()  # New line after progress
-		log(f'SPE computed for {len(shortest_paths_dict)} source nodes', level='SUCCESS')
+		log(f'SPE computed for {len(shortest_paths_dict)} nodes in {max_hops} hops', level='SUCCESS')
+		log(f'Average neighbors per node: {sum(len(v) for v in shortest_paths_dict.values()) / len(shortest_paths_dict):.1f}', level='INFO')
 		
 		return shortest_paths_dict
 
