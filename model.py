@@ -105,17 +105,16 @@ class TransformerLayer(nn.Module):
 		
 		self.dropout = nn.Dropout(dropout)
 	
-	def forward(self, x, attention_samples):
+	def forward(self, x, attention_samples, enhanced_embeddings=None):
 		"""
-		Equations 7-9:
-		Q = h_i * W_Q
-		K = H_Smp_i * W_K
-		V = H_Smp_i * W_V
-		h_i = softmax(QK^T / sqrt(d)) * V
+		Equations 7-9 avec PE enrichis
 		
 		Args:
-			x: [N, d] - node embeddings
+			x: [N, d] - node embeddings (fallback si enhanced_embeddings=None)
 			attention_samples: [N, k] - sampled node indices
+			enhanced_embeddings: dict ou None
+				Si fourni : {'central': [N, d], 'samples': [N, k, d]}
+				Sinon : utilise x directement
 		
 		Returns:
 			x: [N, d] - updated embeddings
@@ -123,15 +122,18 @@ class TransformerLayer(nn.Module):
 		N = x.shape[0]
 		k = attention_samples.shape[1]
 		
-		# Query: central nodes
-		queries = x.unsqueeze(1)  # [N, 1, d]
+		# ✅ CORRECTION : Utiliser les embeddings enrichis si disponibles
+		if enhanced_embeddings is not None:
+			# Cas 1 : PE appliqué, utiliser les embeddings enrichis
+			queries = enhanced_embeddings['central'].unsqueeze(1)  # [N, 1, d]
+			sampled_embeds = enhanced_embeddings['samples']        # [N, k, d]
+		else:
+			# Cas 2 : Pas de PE (fallback), comportement original
+			queries = x.unsqueeze(1)  # [N, 1, d]
+			flat_samples = attention_samples.view(-1)
+			sampled_embeds = x[flat_samples].view(N, k, -1)
 		
-		# Keys and Values: sampled nodes
-		# Gather samples: [N*k] -> [N, k, d]
-		flat_samples = attention_samples.view(-1)
-		sampled_embeds = x[flat_samples].view(N, k, -1)
-		
-		# Multi-head attention
+		# Multi-head attention (reste identique)
 		attn_output, attn_weights = self.multihead_attn(
 			queries,           # Q: [N, 1, d]
 			sampled_embeds,    # K: [N, k, d]
@@ -195,81 +197,53 @@ class AttentionSampleUpdater(nn.Module):
 	
 	def message_passing_update(self, x, adj, current_samples):
 		"""
-		VERSION VECTORISÉE - O(N*k) au lieu de O(N²)
-		Equation 12: Attn_Msg(v_i) = Union of Smp(v_j) for all v_j in N(v_i)
+		VERSION SIMPLIFIÉE selon Section 3.4.3, Equation 12
+		Attn_Msg(v_i) = Union of Smp(v_j) for all v_j in N(v_i)
 		"""
 		N = x.shape[0]
 		device = x.device
 		
-		# Convert sparse adj to dense for neighbor lookup (optimisé)
+		# Convert sparse adj to indices
 		if adj.is_sparse:
-			adj_dense = adj.to_dense()
+			adj_indices = adj._indices()  # [2, num_edges]
 		else:
-			adj_dense = adj
+			adj_indices = adj.nonzero().t()
 		
-		# 1. Pour chaque nœud, récupérer les samples de TOUS ses voisins
-		# Matrice [N, k] -> on veut les samples des voisins
-		
-		# Créer un pool de candidats par nœud (vectorisé)
-		# adj_dense: [N, N], current_samples: [N, k]
-		
-		# Méthode efficace : utiliser gather avec les voisins
 		new_samples_list = []
 		
-		# Batch processing pour économiser mémoire
-		batch_size = 1024
-		for start_idx in range(0, N, batch_size):
-			end_idx = min(start_idx + batch_size, N)
-			batch_adj = adj_dense[start_idx:end_idx]  # [batch, N]
+		for i in range(N):
+			# Trouver les voisins de i
+			neighbor_mask = adj_indices[0] == i
+			neighbors = adj_indices[1][neighbor_mask]
 			
-			# Trouver les voisins (threshold pour sparse graphs)
-			neighbors_mask = batch_adj > 0  # [batch, N]
+			if neighbors.numel() == 0:
+				# Pas de voisins, garder samples actuels
+				new_samples_list.append(current_samples[i])
+				continue
 			
-			# Pour chaque nœud du batch
-			batch_new_samples = []
-			for local_idx in range(end_idx - start_idx):
-				i = start_idx + local_idx
-				
-				# Voisins de i
-				neighbor_indices = neighbors_mask[local_idx].nonzero(as_tuple=True)[0]
-				
-				if neighbor_indices.numel() == 0:
-					# Pas de voisins, garder samples actuels
-					batch_new_samples.append(current_samples[i])
-					continue
-				
-				# Récupérer samples des voisins : [num_neighbors, k]
-				neighbor_samples = current_samples[neighbor_indices]  # [num_neighbors, k]
-				
-				# Ajouter les samples actuels
-				candidate_pool = torch.cat([
-					neighbor_samples.flatten(),
-					current_samples[i]
-				]).unique()
-				
-				# Limiter la taille du pool (pour efficacité)
-				if candidate_pool.numel() > self.k * 5:
-					# Garder les plus similaires (pré-filtrage)
-					similarities = torch.mm(x[i:i+1], x[candidate_pool].t()).squeeze()
-					_, top_indices = torch.topk(similarities, min(self.k * 5, candidate_pool.numel()))
-					candidate_pool = candidate_pool[top_indices]
-				
-				# Calculer similarités avec embedding actuel
-				if candidate_pool.numel() >= self.k:
-					similarities = torch.mm(x[i:i+1], x[candidate_pool].t()).squeeze()
-					_, top_k_indices = torch.topk(similarities, self.k)
-					selected = candidate_pool[top_k_indices]
-				else:
-					# Padding si nécessaire
-					selected = candidate_pool
-					padding_needed = self.k - candidate_pool.numel()
-					if padding_needed > 0:
-						padding = current_samples[i, :padding_needed]
-						selected = torch.cat([selected, padding])
-				
-				batch_new_samples.append(selected)
+			# Récupérer samples des voisins : Union of Smp(v_j)
+			neighbor_samples = current_samples[neighbors]  # [num_neighbors, k]
 			
-			new_samples_list.extend(batch_new_samples)
+			# Pool de candidats : samples des voisins + samples actuels
+			candidate_pool = torch.cat([
+				neighbor_samples.flatten(),
+				current_samples[i]
+			]).unique()
+			
+			# Sélectionner top-k par similarité
+			if candidate_pool.numel() >= self.k:
+				similarities = torch.mm(x[i:i+1], x[candidate_pool].t()).squeeze()
+				_, top_indices = torch.topk(similarities, self.k)
+				selected = candidate_pool[top_indices]
+			else:
+				# Padding si nécessaire
+				selected = candidate_pool
+				padding_needed = self.k - candidate_pool.numel()
+				if padding_needed > 0:
+					padding = current_samples[i, :padding_needed]
+					selected = torch.cat([selected, padding])
+			
+			new_samples_list.append(selected)
 		
 		return torch.stack(new_samples_list)
 	
@@ -438,7 +412,7 @@ class TransGNN(nn.Module):
 	
 	def apply_positional_encoding(self, x, central_indices, attention_samples, handler):
 		"""
-		Applique PE pour un batch de nœuds centraux
+		Applique PE pour un batch de nœuds centraux ET leurs samples
 		
 		Args:
 			x: [N, d] - tous les embeddings
@@ -447,7 +421,10 @@ class TransGNN(nn.Module):
 			handler: DataHandler
 		
 		Returns:
-			enhanced_central: [batch, d]
+			enhanced_embeddings: dict {
+				'central': [batch, d],
+				'samples': [batch, k, d]
+			}
 		"""
 		batch_size = len(central_indices)
 		device = x.device
@@ -476,9 +453,9 @@ class TransGNN(nn.Module):
 			
 			# DE et PRE
 			de = torch.cat([degrees[central_node:central_node+1], 
-			                degrees[attention_samples[idx]]], dim=0)
+							degrees[attention_samples[idx]]], dim=0)
 			pre = torch.cat([pagerank[central_node:central_node+1], 
-			                 pagerank[attention_samples[idx]]], dim=0)
+							pagerank[attention_samples[idx]]], dim=0)
 			
 			all_features.append(node_feats)
 			all_spe.append(spe)
@@ -496,49 +473,66 @@ class TransGNN(nn.Module):
 			node_features, shortest_paths, degrees_gathered, pageranks_gathered
 		)  # [batch, k+1, d]
 		
-		# Retourner seulement les nœuds centraux
-		return enhanced[:, 0, :]  # [batch, d]
+		return {
+			'central': enhanced[:, 0, :],      # [batch, d]
+			'samples': enhanced[:, 1:, :]      # [batch, k, d]
+		}
 	
 	def forward(self, adj, attention_samples, handler):
 		"""
-		Forward pass - ARCHITECTURE EXACTE
+		Forward pass - ARCHITECTURE EXACTE avec PE corrigé
 		Trans₁ → GNN₁ → Trans₂ → GNN₂ → Trans₃
 		"""
 		# Initial embeddings
 		embeds = torch.cat([self.user_embedding, self.item_embedding], dim=0)
 		
-		# Layer aggregation (mentionné dans l'article)
+		# Layer aggregation
 		embeds_list = [embeds]
 		
 		current_embeds = embeds
 		current_samples = attention_samples
 		
-		# === BLOCK 1: Transformer ===
-		# Apply PE avant chaque Transformer
 		N = current_embeds.shape[0]
 		central_indices = torch.arange(N, device=current_embeds.device)
-		current_embeds = self.apply_positional_encoding(
+		
+		# ========================================================================
+		# BLOCK 1: Transformer₁ avec PE
+		# ========================================================================
+		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
 		
-		current_embeds = self.transformer_layers[0](current_embeds, current_samples)
+		current_embeds = self.transformer_layers[0](
+			current_embeds, 
+			current_samples,
+			enhanced_embeddings=enhanced_embs
+		)
 		embeds_list.append(current_embeds)
 		
-		# Update samples si demandé
+		# Update samples (optionnel selon args)
 		if args.update_every_block and args.update_strategy != 'none':
 			current_samples = self.sample_updater(
 				current_embeds, adj, current_samples, strategy=args.update_strategy
 			)
 		
-		# === BLOCK 2: GNN ===
+		# ========================================================================
+		# BLOCK 2: GNN₁
+		# ========================================================================
 		current_embeds = self.gnn_layers[0](current_embeds, adj)
 		embeds_list.append(current_embeds)
 		
-		# === BLOCK 3: Transformer ===
-		current_embeds = self.apply_positional_encoding(
+		# ========================================================================
+		# BLOCK 3: Transformer₂ avec PE
+		# ========================================================================
+		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
-		current_embeds = self.transformer_layers[1](current_embeds, current_samples)
+		
+		current_embeds = self.transformer_layers[1](
+			current_embeds, 
+			current_samples,
+			enhanced_embeddings=enhanced_embs
+		)
 		embeds_list.append(current_embeds)
 		
 		if args.update_every_block and args.update_strategy != 'none':
@@ -546,15 +540,24 @@ class TransGNN(nn.Module):
 				current_embeds, adj, current_samples, strategy=args.update_strategy
 			)
 		
-		# === BLOCK 4: GNN ===
+		# ========================================================================
+		# BLOCK 4: GNN₂
+		# ========================================================================
 		current_embeds = self.gnn_layers[1](current_embeds, adj)
 		embeds_list.append(current_embeds)
 		
-		# === BLOCK 5: Transformer (final) ===
-		current_embeds = self.apply_positional_encoding(
+		# ========================================================================
+		# BLOCK 5: Transformer₃ (final) avec PE
+		# ========================================================================
+		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
-		current_embeds = self.transformer_layers[2](current_embeds, current_samples)
+		
+		current_embeds = self.transformer_layers[2](
+			current_embeds, 
+			current_samples,
+			enhanced_embeddings=enhanced_embs
+		)
 		embeds_list.append(current_embeds)
 		
 		# Aggregate all layers
@@ -565,6 +568,7 @@ class TransGNN(nn.Module):
 		item_embeds = final_embeds[args.user:]
 		
 		return final_embeds, user_embeds, item_embeds
+
 	
 	def bprLoss(self, user_embeds, item_embeds, ancs, poss, negs):
 		"""BPR Loss (Equation 13)"""

@@ -7,12 +7,12 @@ def ParseArgs():
 	parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
 	parser.add_argument('--batch', default=4096, type=int, 
 	                    help='batch size (paper uses 4096)')
-	parser.add_argument('--epoch', default=100, type=int, 
+	parser.add_argument('--epoch', default=50, type=int, 
 	                    help='max epochs (paper uses early stopping)')
-	parser.add_argument('--decay', default=1e-4, type=float, help='weight decay')
-	parser.add_argument('--tstEpoch', default=1, type=int, 
+	parser.add_argument('--decay', default=0, type=float, help='weight decay')
+	parser.add_argument('--tstEpoch', default=3, type=int, 
 	                    help='test every N epochs')
-	parser.add_argument('--tstBat', default=256, type=int, help='test batch size')
+	parser.add_argument('--tstBat', default=64, type=int, help='test batch size')
 	
 	# ==================== MODEL ARCHITECTURE ====================
 	# Section 4.1.4: "We use three Transformer layers with two GNN layers sandwiched between them"
@@ -29,7 +29,7 @@ def ParseArgs():
 	                    help='dropout rate')
 	
 	# ==================== ATTENTION SAMPLING (Section 3.2) ====================
-	parser.add_argument('--k_samples', default=25, type=int, 
+	parser.add_argument('--k_samples', default=20, type=int, 
 	                    help='number of attention samples (k) - paper uses 20-30')
 	parser.add_argument('--alpha', default=0.5, type=float, 
 	                    help='balance factor for structure-aware similarity (Eq. 2)')
@@ -75,6 +75,9 @@ def ParseArgs():
 	parser.add_argument('--spe_sample_size', default=5000, type=int,
 	                    help='number of nodes to sample for SPE computation')
 	
+
+	parser.add_argument('--update_every_block', default=True, type=bool,
+                    help='Update attention samples after each Transformer block')
 	return parser.parse_args()
 
 args = ParseArgs()

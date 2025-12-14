@@ -338,7 +338,6 @@ class Coach:
             'dataset': args.data,
             'config': {
                 'latdim': args.latdim,
-                'block_num': args.block_num,
                 'num_head': args.num_head,
                 'k_samples': args.k_samples,
                 'dropout': args.dropout,

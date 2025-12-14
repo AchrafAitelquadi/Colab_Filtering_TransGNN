@@ -401,7 +401,6 @@ class ResultsManager:
                 <h2>Model Configuration</h2>
                 <table>
                     <tr><td>Embedding Dimension</td><td>{args.latdim}</td></tr>
-                    <tr><td>TransGNN Blocks</td><td>{args.block_num}</td></tr>
                     <tr><td>Attention Heads</td><td>{args.num_head}</td></tr>
                     <tr><td>Attention Samples (k)</td><td>{args.k_samples}</td></tr>
                     <tr><td>Dropout</td><td>{args.dropout}</td></tr>
