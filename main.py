@@ -182,7 +182,12 @@ class Coach:
         epoch_loss = 0
         steps = len(self.handler.trnLoader)
         
+        log(f'Starting training epoch with {steps} batches...', level='DEBUG')
+        
         for i, (ancs, poss, negs) in enumerate(self.handler.trnLoader):
+            if i == 0:
+                log(f'Processing first batch: ancs={ancs.shape}, poss={poss.shape}, negs={negs.shape}', level='DEBUG')
+            
             # Move to device
             if t.cuda.is_available():
                 ancs = ancs.long().cuda()
@@ -193,27 +198,51 @@ class Coach:
                 poss = poss.long()
                 negs = negs.long()
             
+            if i == 0:
+                log(f'Data moved to device', level='DEBUG')
+            
             # Get adjacency matrix
             adj = self.handler.torchBiAdj
             if t.cuda.is_available():
                 adj = adj.cuda()
             
+            if i == 0:
+                log(f'Starting forward pass...', level='DEBUG')
+            
             # Forward pass
-            loss = self.model.calcLosses(
-                ancs, poss, negs, adj,
-                attention_samples=self.attention_samples,
-                handler=self.handler
-            )
+            try:
+                loss = self.model.calcLosses(
+                    ancs, poss, negs, adj,
+                    attention_samples=self.attention_samples,
+                    handler=self.handler
+                )
+            except Exception as e:
+                log(f'Error in forward pass at batch {i}: {e}', level='ERROR')
+                raise
+            
+            if i == 0:
+                log(f'Forward pass complete, loss={loss.item():.4f}', level='DEBUG')
             
             epoch_loss += loss.item()
             
             # Backward pass
             self.opt.zero_grad()
+            
+            if i == 0:
+                log(f'Starting backward pass...', level='DEBUG')
+            
             loss.backward()
+            
+            if i == 0:
+                log(f'Backward pass complete', level='DEBUG')
+            
             self.opt.step()
             
+            if i == 0:
+                log(f'Optimizer step complete', level='DEBUG')
+            
             # Progress
-            if (i + 1) % 50 == 0 or (i + 1) == steps:
+            if (i + 1) % 10 == 0 or (i + 1) == steps:
                 print(f'\r  Train Progress: [{i+1}/{steps}] Loss: {loss.item():.4f}', 
                       end='', flush=True)
         

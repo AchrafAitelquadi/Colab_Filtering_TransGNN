@@ -483,6 +483,9 @@ class TransGNN(nn.Module):
 		Forward pass - ARCHITECTURE EXACTE avec PE corrigé
 		Trans₁ → GNN₁ → Trans₂ → GNN₂ → Trans₃
 		"""
+		import time
+		start_time = time.time()
+		
 		# Initial embeddings
 		embeds = torch.cat([self.user_embedding, self.item_embedding], dim=0)
 		
@@ -498,66 +501,89 @@ class TransGNN(nn.Module):
 		# ========================================================================
 		# BLOCK 1: Transformer₁ avec PE
 		# ========================================================================
+		block_start = time.time()
+		
 		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
 		
+		print(f"\n[DEBUG] PE for Block 1: {time.time() - block_start:.2f}s", flush=True)
+		
+		trans_start = time.time()
 		current_embeds = self.transformer_layers[0](
 			current_embeds, 
 			current_samples,
 			enhanced_embeddings=enhanced_embs
 		)
+		print(f"[DEBUG] Transformer 1: {time.time() - trans_start:.2f}s", flush=True)
+		
 		embeds_list.append(current_embeds)
 		
 		# Update samples (optionnel selon args)
 		if args.update_every_block and args.update_strategy != 'none':
+			update_start = time.time()
 			current_samples = self.sample_updater(
 				current_embeds, adj, current_samples, strategy=args.update_strategy
 			)
+			print(f"[DEBUG] Sample update 1: {time.time() - update_start:.2f}s", flush=True)
 		
 		# ========================================================================
 		# BLOCK 2: GNN₁
 		# ========================================================================
+		gnn_start = time.time()
 		current_embeds = self.gnn_layers[0](current_embeds, adj)
+		print(f"[DEBUG] GNN 1: {time.time() - gnn_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
 		# ========================================================================
 		# BLOCK 3: Transformer₂ avec PE
 		# ========================================================================
+		block_start = time.time()
 		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
+		print(f"[DEBUG] PE for Block 2: {time.time() - block_start:.2f}s", flush=True)
 		
+		trans_start = time.time()
 		current_embeds = self.transformer_layers[1](
 			current_embeds, 
 			current_samples,
 			enhanced_embeddings=enhanced_embs
 		)
+		print(f"[DEBUG] Transformer 2: {time.time() - trans_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
 		if args.update_every_block and args.update_strategy != 'none':
+			update_start = time.time()
 			current_samples = self.sample_updater(
 				current_embeds, adj, current_samples, strategy=args.update_strategy
 			)
+			print(f"[DEBUG] Sample update 2: {time.time() - update_start:.2f}s", flush=True)
 		
 		# ========================================================================
 		# BLOCK 4: GNN₂
 		# ========================================================================
+		gnn_start = time.time()
 		current_embeds = self.gnn_layers[1](current_embeds, adj)
+		print(f"[DEBUG] GNN 2: {time.time() - gnn_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
 		# ========================================================================
 		# BLOCK 5: Transformer₃ (final) avec PE
 		# ========================================================================
+		block_start = time.time()
 		enhanced_embs = self.apply_positional_encoding(
 			current_embeds, central_indices, current_samples, handler
 		)
+		print(f"[DEBUG] PE for Block 3: {time.time() - block_start:.2f}s", flush=True)
 		
+		trans_start = time.time()
 		current_embeds = self.transformer_layers[2](
 			current_embeds, 
 			current_samples,
 			enhanced_embeddings=enhanced_embs
 		)
+		print(f"[DEBUG] Transformer 3: {time.time() - trans_start:.2f}s", flush=True)
 		embeds_list.append(current_embeds)
 		
 		# Aggregate all layers
@@ -566,6 +592,8 @@ class TransGNN(nn.Module):
 		# Split user/item
 		user_embeds = final_embeds[:args.user]
 		item_embeds = final_embeds[args.user:]
+		
+		print(f"[DEBUG] Total forward time: {time.time() - start_time:.2f}s\n", flush=True)
 		
 		return final_embeds, user_embeds, item_embeds
 
