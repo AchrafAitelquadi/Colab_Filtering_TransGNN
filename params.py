@@ -6,7 +6,7 @@ def ParseArgs():
 	# ==================== TRAINING PARAMETERS ====================
 	parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
 	parser.add_argument('--batch', default=4096, type=int, help='batch size')
-	parser.add_argument('--epoch', default=40, type=int, help='max epochs')
+	parser.add_argument('--epoch', default=100, type=int, help='max epochs')
 	parser.add_argument('--decay', default=0, type=float, help='weight decay')
 	parser.add_argument('--tstEpoch', default=3, type=int, help='test every N epochs')
 	parser.add_argument('--tstBat', default=256, type=int, help='test batch size')
