@@ -82,6 +82,7 @@ class Coach:
         
         global_start_time = time.time()
         no_improve_count = 0
+        epoch_times = []  # Pour calculer le temps moyen par epoch
         
         for ep in range(args.epoch):
             epoch_start = time.time()
@@ -93,6 +94,22 @@ class Coach:
             # Training
             train_loss = self.trainEpoch(ep)
             train_time = time.time() - epoch_start
+            epoch_times.append(train_time)
+            
+            # Calculer ETA (Estimated Time of Arrival)
+            avg_epoch_time = sum(epoch_times) / len(epoch_times)
+            remaining_epochs = args.epoch - (ep + 1)
+            eta_seconds = avg_epoch_time * remaining_epochs
+            eta_minutes = eta_seconds / 60
+            eta_hours = eta_minutes / 60
+            
+            # Formater ETA
+            if eta_hours >= 1:
+                eta_str = f"{eta_hours:.1f}h"
+            elif eta_minutes >= 1:
+                eta_str = f"{eta_minutes:.1f}min"
+            else:
+                eta_str = f"{eta_seconds:.0f}s"
             
             # Log training results to CSV
             self.results_manager.log_epoch_results(
@@ -102,7 +119,7 @@ class Coach:
                 lr=current_lr
             )
             
-            log(f'Epoch [{ep+1:3d}/{args.epoch}] | Loss: {train_loss:.4f} | Time: {train_time:.1f}s | LR: {current_lr:.6f}', 
+            log(f'Epoch [{ep+1:3d}/{args.epoch}] | Loss: {train_loss:.4f} | Time: {train_time:.1f}s | LR: {current_lr:.6f} | ETA: {eta_str}', 
                 level='INFO')
             
             # Testing
@@ -270,7 +287,13 @@ class Coach:
             if (i + 1) % 50 == 0 or (i + 1) == steps:
                 avg_loss = sum(batch_losses[-10:]) / min(10, len(batch_losses[-10:]))
                 progress = (i + 1) / steps * 100
-                print(f'\r   Training: [{i+1:4d}/{steps}] ({progress:5.1f}%) | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}', 
+                
+                # Barre de progression visuelle
+                bar_length = 20
+                filled = int(bar_length * progress / 100)
+                bar = '█' * filled + '░' * (bar_length - filled)
+                
+                print(f'\r   Training: [{i+1:4d}/{steps}] |{bar}| {progress:5.1f}% | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}', 
                       end='', flush=True)
         
         print()  # New line
@@ -332,7 +355,13 @@ class Coach:
                     progress = (i + 1) / steps * 100
                     current_avg_recall = epoch_recall / num_users
                     current_avg_ndcg = epoch_ndcg / num_users
-                    print(f'\r   Testing: [{i+1:3d}/{steps}] ({progress:5.1f}%) | Recall: {current_avg_recall:.4f} | NDCG: {current_avg_ndcg:.4f}', 
+                    
+                    # Barre de progression visuelle
+                    bar_length = 15
+                    filled = int(bar_length * progress / 100)
+                    bar = '█' * filled + '░' * (bar_length - filled)
+                    
+                    print(f'\r   Testing: [{i+1:3d}/{steps}] |{bar}| {progress:5.1f}% | Recall: {current_avg_recall:.4f} | NDCG: {current_avg_ndcg:.4f}', 
                           end='', flush=True)
         
         print()  # New line
