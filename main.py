@@ -169,9 +169,25 @@ class Coach:
             'best_epoch': self.best_epoch + 1
         }
         
+        # Get final embeddings for analysis
+        log('Extracting final embeddings for visualization...', level='INFO')
+        self.model.eval()
+        with t.no_grad():
+            adj = self.handler.torchBiAdj
+            if t.cuda.is_available():
+                adj = adj.cuda()
+            
+            _, user_embeds_final, item_embeds_final = self.model(
+                adj, 
+                self.attention_samples, 
+                self.handler
+            )
+        
         output_files = self.results_manager.finalize(
             best_results=best_results,
-            training_time=total_training_time
+            training_time=total_training_time,
+            user_embeds=user_embeds_final,
+            item_embeds=item_embeds_final
         )
         
         # Plot learning rate schedule
@@ -241,6 +257,9 @@ class Coach:
             
             epoch_loss += loss.item()
             batch_losses.append(loss.item())
+            
+            # Log batch loss pour visualisation détaillée
+            self.results_manager.log_batch_step(loss.item())
             
             # Backward pass
             self.opt.zero_grad()
